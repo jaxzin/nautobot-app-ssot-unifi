@@ -1,22 +1,19 @@
 [tool.poetry]
 name = "nautobot-ssot-unifi"
-version = "1.0.4"
+version = "1.1.0a1"
 description = "Nautobot SSoT integration for Ubiquiti Unifi."
 authors = ["Andrew Bates <abates@omeganetserv.com>"]
 license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/abates/nautobot-app-ssot-unifi"
-repository = "https://github.com/abates/nautobot-app-ssot-unifi"
+repository = "https://github.com/jaxzin/nautobot-app-ssot-unifi"
 documentation = "https://docs.nautobot.com/projects/nautobot-ssot-unifi/en/latest/"
 keywords = ["nautobot", "nautobot-app", "nautobot-plugin"]
 classifiers = [
     "Intended Audience :: Developers",
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 packages = [
     { include = "nautobot_ssot_unifi" },
@@ -29,8 +26,8 @@ include = [
 [tool.poetry.dependencies]
 python = ">=3.12,<3.13"
 # Used for local development
-nautobot = "^2.3.0"
-nautobot-ssot = "^3.3.0"
+nautobot = ">=3.2.4,<4.0.0"
+nautobot-ssot = ">=4.6.1,<5.0.0"
 napalm-unifi = "*"
 aiounifi = "*"
 

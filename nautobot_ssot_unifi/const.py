@@ -30,12 +30,24 @@ UNIFI_MAP = {
         "role": "Firewall",
         "napalm_driver": "napalm_unifi.usg",
     },
+    "udm": {
+        "platform": "Unifi Cloud Gateway",
+        "role": "Firewall",
+        "napalm_driver": "",
+    },
+    "umbb": {
+        "platform": "Unifi Mobile Broadband",
+        "role": "Modem",
+        "napalm_driver": "",
+    },
 }
 
 UNIFI_SSOT_TAG = "unifi-ssot"
 
 UNIFI_SSOT_INTERFACE_TYPES = {
     "ge": InterfaceTypeChoices.TYPE_1GE_FIXED,
+    "2p5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,
+    "10ge": InterfaceTypeChoices.TYPE_10GE_FIXED,
     "sfp": InterfaceTypeChoices.TYPE_1GE_SFP,
     "other": InterfaceTypeChoices.TYPE_OTHER,
 }

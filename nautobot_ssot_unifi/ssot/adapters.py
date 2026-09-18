@@ -133,8 +133,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 parent__prefix_length=ip_address.prefixlen,
             )
         )
+        self.add(interface)
         if created:
-            self.add(interface)
             assignment = self.ip_address_to_interface(
                 **{f"interface__{key}": value for key, value in interface.get_identifiers().items()},
                 ip_address__host=ip,
@@ -153,6 +153,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             verify_cert=verify_cert,
             timeout=timeout,
         )
+        try:
+            await self._load_sites()
+        finally:
+            await self.client.logout()
+
+    async def _load_sites(self):
+        """Load the selected controller's sites while its session is open."""
         await self._info("Loading data from the Unifi Controller %s", self.job.controller)
         self.add(
             self.device_group(
@@ -162,26 +169,26 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         )
         for site in await self.client.get_sites():
             site_name = site.name
-            self.client.site = site_name
+            self.client.current_site = site_name
+            location_type__name = self.default_location_type
             if site_name == "default":
                 site_name = self.default_location_name
-                location_type__name = self.default_location_type
             site = self.site(name=site_name, location_type__name=location_type__name)
             await self._debug("Added site %s", site)
             self.add(site)
 
             for unifi_device in await self.client.get_devices():
-                unifi_info = self.job.hardware_models[unifi_device.model]
-                unifi_type = unifi_info["type"]
+                unifi_info = self.job.hardware_models.get(unifi_device.model, {})
+                unifi_type = unifi_device.type
                 if unifi_type == "usw":
-                    if "lite" in unifi_info["name"].lower():
+                    if "lite" in unifi_info.get("name", "").lower():
                         unifi_type = "usw_lite"
-                    elif "flex" in unifi_info["name"].lower():
+                    elif "flex" in unifi_info.get("name", "").lower():
                         unifi_type = "usw_flex"
 
                 device_type = self.device_type(
                     model=unifi_device.model,
-                    part_number=unifi_info["sku"],
+                    part_number=unifi_info.get("sku", ""),
                 )
                 _, created = self.get_or_add_model_instance(device_type)
                 if created:
@@ -199,14 +206,18 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 )
                 await self._debug("Adding device %s", device)
                 self.add(device)
-                for port in unifi_device.raw["port_table"]:
+                for port in unifi_device.port_table:
+                    media = port.get("media")
                     interface = self._create_interface(
                         device,
                         port["name"],
-                        UNIFI_SSOT_INTERFACE_TYPES[port.get("media", "other").lower()],
+                        UNIFI_SSOT_INTERFACE_TYPES.get(
+                            media.lower() if isinstance(media, str) else "other",
+                            UNIFI_SSOT_INTERFACE_TYPES["other"],
+                        ),
                         port["port_idx"],
                     )
-                    if "ip" in port:
+                    if port.get("ip") and port.get("netmask"):
                         await self._assign_ip(port["ip"], port["netmask"], interface)
                     else:
                         self.add(interface)
