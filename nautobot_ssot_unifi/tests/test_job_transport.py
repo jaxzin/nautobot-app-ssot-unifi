@@ -3,12 +3,18 @@
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
+from diffsync.enum import DiffSyncFlags
 
 from nautobot_ssot_unifi.jobs import UnifiDataSource
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 
 
 class JobTransportTests(TestCase):
+    def test_missing_source_objects_are_not_deleted(self):
+        job = UnifiDataSource()
+        self.assertTrue(job.diffsync_flags & DiffSyncFlags.SKIP_UNMATCHED_DST)
+        self.assertFalse(job.diffsync_flags & DiffSyncFlags.SKIP_UNMATCHED_SRC)
+
     def test_controller_hostname_is_preserved_for_tls(self):
         job = UnifiDataSource()
         integration = SimpleNamespace(

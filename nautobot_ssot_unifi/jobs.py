@@ -6,6 +6,7 @@ from os import path
 from urllib.parse import urlparse
 
 from django.core.exceptions import ValidationError
+from diffsync.enum import DiffSyncFlags
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 
@@ -22,6 +23,11 @@ name = "Unifi SSoT"  # pylint: disable=invalid-name
 
 class UnifiDataSource(DataSource, Job):
     """Unifi SSoT Data Source."""
+
+    def __init__(self):
+        """Retain last-known inventory when a source object disappears."""
+        super().__init__()
+        self.diffsync_flags |= DiffSyncFlags.SKIP_UNMATCHED_DST
 
     debug: bool = BooleanVar(description="Enable for more verbose debug logging", default=False)
     controller: Controller = ObjectVar(description="Unifi Controller to sync with", model=Controller)
