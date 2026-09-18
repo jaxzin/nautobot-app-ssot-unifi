@@ -153,6 +153,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             verify_cert=verify_cert,
             timeout=timeout,
         )
+        try:
+            await self._load_sites()
+        finally:
+            await self.client.logout()
+
+    async def _load_sites(self):
+        """Load the selected controller's sites while its session is open."""
         await self._info("Loading data from the Unifi Controller %s", self.job.controller)
         self.add(
             self.device_group(
@@ -162,10 +169,10 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         )
         for site in await self.client.get_sites():
             site_name = site.name
-            self.client.site = site_name
+            self.client.current_site = site_name
+            location_type__name = self.default_location_type
             if site_name == "default":
                 site_name = self.default_location_name
-                location_type__name = self.default_location_type
             site = self.site(name=site_name, location_type__name=location_type__name)
             await self._debug("Added site %s", site)
             self.add(site)

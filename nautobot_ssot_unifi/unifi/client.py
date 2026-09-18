@@ -1,14 +1,15 @@
 """The unifi client definition for SSoT."""
 
 from typing import Iterable, TYPE_CHECKING
+import ssl
 
 import aiohttp
 
 from aiounifi.controller import Controller as UnifiController
 from aiounifi.models.configuration import Configuration as UnifiConfiguration
+from aiounifi.models.device import Device, DeviceListRequest
 
 if TYPE_CHECKING:
-    from aiounifi.models.device import Device
     from aiounifi.models.site import Site
 
 
@@ -50,8 +51,9 @@ class Client:
                 certificate. Defaults to True.
             timeout (int, optional): The timeout (in seconds) for requests. Defaults to 30.
         """
+        ssl_context = ssl.create_default_context() if verify_cert else False
         self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(verify_ssl=verify_cert),
+            connector=aiohttp.TCPConnector(ssl=ssl_context),
             cookie_jar=aiohttp.CookieJar(unsafe=True),
             timeout=aiohttp.ClientTimeout(total=timeout),
         )
@@ -62,6 +64,7 @@ class Client:
             password=password,
             port=port,
             site="default",
+            ssl_context=ssl_context,
         )
         self.api = UnifiController(self.config)
         self.logged_in = False
@@ -96,5 +99,6 @@ class Client:
     @require_login
     async def get_devices(self) -> Iterable["Device"]:
         """Get an iterable of devices for the current site."""
-        await self.api.devices.update()
-        return self.api.devices.values()
+        # A fresh snapshot avoids the event cache retaining devices from a previous site.
+        response = await self.api.request(DeviceListRequest.create())
+        return [Device(raw) for raw in response["data"]]

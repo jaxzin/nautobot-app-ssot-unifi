@@ -13,8 +13,6 @@ from nautobot.dcim.models import Controller, LocationType, Location
 from nautobot.extras.models import ExternalIntegration, SecretsGroup, SecretsGroupAssociation
 from nautobot.extras.choices import SecretsGroupAccessTypeChoices, SecretsGroupSecretTypeChoices
 
-from netutils.dns import fqdn_to_ip
-
 from nautobot_ssot.jobs.base import DataSource
 
 from nautobot_ssot_unifi.ssot import adapters
@@ -100,7 +98,7 @@ class UnifiDataSource(DataSource, Job):
             default_location_name=default_location_name,
         )
         self.source_adapter.load(
-            host=fqdn_to_ip(url.hostname),
+            host=url.hostname,
             port=(url.port or 443),
             username=username,
             password=password,

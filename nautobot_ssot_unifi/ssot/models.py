@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Annotated, Optional
 import uuid
 
+from diffsync.exceptions import ObjectNotCreated
 from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation
 
 from nautobot.extras.models import Tag, Status
@@ -40,9 +41,8 @@ class UnifiModelMixin:
 
         This method will first look for a corresponding object in the
         database (by identifier). If found, rather than "creating" a
-        new object the existing object will be tagged with the UNIFI_SSOT_TAG
-        and then updated with the attributes. If not found then
-        the object is created.
+        new object the existing object must already have UNIFI_SSOT_TAG.
+        Untagged objects are not adopted. If not found then the object is created.
 
         Args:
             adapter (UnifiNautobotAdapter): The diffsync adapter.
@@ -54,8 +54,9 @@ class UnifiModelMixin:
         """
         try:
             obj = cls._model.objects.get(**ids)
-            obj.tags.add(Tag.objects.get(name=UNIFI_SSOT_TAG))
-            return cls(**{**ids, **attrs, "pk": obj.pk})
+            if not obj.tags.filter(name=UNIFI_SSOT_TAG).exists():
+                raise ObjectNotCreated("Matching inventory exists outside UniFi ownership; refusing to adopt it.")
+            return cls(**{**ids, **attrs, "pk": obj.pk, "adapter": adapter})
         except cls._model.DoesNotExist:
             model = super().create(adapter, ids, attrs)
             cls._model.objects.get(**ids).tags.add(Tag.objects.get(name=UNIFI_SSOT_TAG))
@@ -159,7 +160,7 @@ class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
                 {
                     "device": {**ids},
                     "primary_ip4": attrs.pop("primary_ip4__host", None),
-                    "primary_ip6": attrs.pop("primary_ip4__host", None),
+                    "primary_ip6": attrs.pop("primary_ip6__host", None),
                 }
             )
         return super().create(adapter, ids, attrs)
