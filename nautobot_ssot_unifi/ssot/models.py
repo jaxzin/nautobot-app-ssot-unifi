@@ -280,6 +280,17 @@ class IPAddressToInterfaceModel(NautobotModel):
 
     _attributes = tuple()
 
+    @classmethod
+    def get_queryset(cls):
+        """Read only assignments whose address and interface are UniFi-owned."""
+        # Native assignment records do not support tags. Ownership belongs to
+        # both endpoints; loading unrelated assignments can fail when their
+        # interfaces have no UniFi controller-managed device group.
+        return super().get_queryset().filter(
+            interface__tags__name=UNIFI_SSOT_TAG,
+            ip_address__tags__name=UNIFI_SSOT_TAG,
+        ).distinct()
+
     ip_address__host: str
     interface__label: str
     interface__device__name: str
