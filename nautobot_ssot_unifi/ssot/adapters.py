@@ -16,6 +16,7 @@ from structlog import BoundLogger
 
 from nautobot_ssot_unifi.const import UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
 from nautobot_ssot_unifi.ssot import models
+from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -206,15 +207,11 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 )
                 await self._debug("Adding device %s", device)
                 self.add(device)
-                for port in unifi_device.port_table:
-                    media = port.get("media")
+                for port in _interface_records(unifi_device.raw):
                     interface = self._create_interface(
                         device,
                         port["name"],
-                        UNIFI_SSOT_INTERFACE_TYPES.get(
-                            media.lower() if isinstance(media, str) else "other",
-                            UNIFI_SSOT_INTERFACE_TYPES["other"],
-                        ),
+                        port["type"],
                         port["port_idx"],
                     )
                     if port.get("ip") and port.get("netmask"):

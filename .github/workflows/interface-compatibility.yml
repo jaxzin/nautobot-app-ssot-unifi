@@ -1,0 +1,26 @@
+name: Interface compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [codex/persistent-interfaces]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.3"
+          python-version: "3.12"
+      - name: Install supported runtime
+        run: |
+          uv venv
+          uv pip install . nautobot==3.2.4 nautobot-ssot==4.6.1
+          uv pip check
+      - name: Validate persistent interfaces and existing source boundaries
+        run: uv run --no-project --python .venv/bin/python python ci/check_runtime.py

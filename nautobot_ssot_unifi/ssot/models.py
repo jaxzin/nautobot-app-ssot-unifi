@@ -206,7 +206,7 @@ class InterfaceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
     device__controller_managed_device_group__controller__name: str
 
     type: str
-    unifi_port_id: Annotated[int, CustomFieldAnnotation(name="unifi_port_id")] = None
+    unifi_port_id: Annotated[Optional[int], CustomFieldAnnotation(name="unifi_port_id")] = None
 
     status_id: uuid.UUID = None
 
@@ -286,10 +286,15 @@ class IPAddressToInterfaceModel(NautobotModel):
         # Native assignment records do not support tags. Ownership belongs to
         # both endpoints; loading unrelated assignments can fail when their
         # interfaces have no UniFi controller-managed device group.
-        return super().get_queryset().filter(
-            interface__tags__name=UNIFI_SSOT_TAG,
-            ip_address__tags__name=UNIFI_SSOT_TAG,
-        ).distinct()
+        return (
+            super()
+            .get_queryset()
+            .filter(
+                interface__tags__name=UNIFI_SSOT_TAG,
+                ip_address__tags__name=UNIFI_SSOT_TAG,
+            )
+            .distinct()
+        )
 
     ip_address__host: str
     interface__label: str
