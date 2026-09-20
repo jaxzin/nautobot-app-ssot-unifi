@@ -207,7 +207,17 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 )
                 await self._debug("Adding device %s", device)
                 self.add(device)
-                for port in _interface_records(unifi_device.raw):
+                interfaces = _interface_records(unifi_device.raw)
+                config_network = unifi_device.raw["config_network"]
+                if (
+                    config_network
+                    and config_network["type"] == "static"
+                    and any(row["name"] == "mgmt" for row in interfaces)
+                ):
+                    # A source interface name alone cannot bind the controller's
+                    # device-level address to that interface.
+                    raise ValueError("Reported management interface conflicts with synthetic management interface.")
+                for port in interfaces:
                     interface = self._create_interface(
                         device,
                         port["name"],

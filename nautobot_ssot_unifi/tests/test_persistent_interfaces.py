@@ -124,3 +124,42 @@ class PersistentInterfaceTests(TestCase):
             with self.subTest(table=next(iter(table))):
                 with self.assertRaises(ValueError):
                     self.load(**table)
+
+    def test_distinct_ethernet_names_cannot_share_a_port_identifier(self):
+        with self.assertRaises(ValueError):
+            self.load(ethernet_table=[{"name": "eth0", "port_idx": 1}, {"name": "eth1", "port_idx": 1}])
+
+    def test_verified_alias_enriches_the_existing_port_without_renaming_it(self):
+        adapter = self.load(
+            port_table=[{"name": "Port 1", "port_idx": 1}],
+            ethernet_table=[
+                {"name": "eth0", "port_idx": 1, "media": "2.5GE", "ip": "192.0.2.1", "netmask": "255.255.255.0"}
+            ],
+        )
+        self.assertEqual([(i.label, i.type) for i in adapter.get_all("interface")], [("Port 1", "2.5gbase-t")])
+        self.assertEqual([(ip.host, ip.mask_length) for ip in adapter.get_all("ip_address")], [("192.0.2.1", 24)])
+        self.assertEqual(len(adapter.get_all("ip_address_to_interface")), 1)
+
+    def test_conflicting_alias_attributes_fail_without_selecting_a_winner(self):
+        for conflict in ({"media": "GE"}, {"ip": "192.0.2.2"}, {"netmask": "255.255.0.0"}):
+            with self.subTest(conflict=conflict):
+                with self.assertRaises(ValueError):
+                    self.load(
+                        port_table=[
+                            {
+                                "name": "Port 1",
+                                "port_idx": 1,
+                                "media": "2.5GE",
+                                "ip": "192.0.2.1",
+                                "netmask": "255.255.255.0",
+                            }
+                        ],
+                        ethernet_table=[{"name": "eth0", "port_idx": 1, **conflict}],
+                    )
+
+    def test_reported_mgmt_does_not_implicitly_adopt_synthetic_management_address(self):
+        with self.assertRaisesRegex(ValueError, "management interface"):
+            self.load(
+                ethernet_table=[{"name": "mgmt"}],
+                config_network={"type": "static", "ip": "192.0.2.1", "netmask": "255.255.255.0"},
+            )

@@ -27,6 +27,20 @@ def _media_type(row, default):
     return UNIFI_SSOT_INTERFACE_TYPES.get(media.lower() if isinstance(media, str) else "", default)
 
 
+def _enrich(record, alias):
+    media = _media_type(alias, InterfaceTypeChoices.TYPE_OTHER)
+    if media != InterfaceTypeChoices.TYPE_OTHER:
+        if record["type"] not in (InterfaceTypeChoices.TYPE_OTHER, media):
+            raise ValueError("Conflicting UniFi interface capabilities.")
+        record["type"] = media
+    for field in ("ip", "netmask"):
+        value = alias.get(field)
+        if value:
+            if record[field] and record[field] != value:
+                raise ValueError("Conflicting UniFi interface addressing.")
+            record[field] = value
+
+
 def _interface_records(raw):
     records, origins, port_ids, ifnames = {}, {}, {}, {}
 
@@ -67,9 +81,14 @@ def _interface_records(raw):
             raise ValueError("Conflicting UniFi interface aliases.")
         # Only explicit source identity links establish a duplicate. num_port,
         # matching MACs, and display-name similarity do not establish aliases.
-        if by_id is not None or by_name is not None:
+        canonical = by_id or by_name
+        if canonical is not None:
+            if origins[canonical] != "port" and row["name"] != canonical:
+                raise ValueError("Ambiguous UniFi Ethernet port identifier.")
+            _enrich(records[canonical], row)
             continue
-        add(row, "ethernet", InterfaceTypeChoices.TYPE_OTHER)
+        name = add(row, "ethernet", InterfaceTypeChoices.TYPE_OTHER)
+        index(port_ids, port_id, name)
 
     for row in _table(raw, "radio_table"):
         # A band or negotiated rate does not identify the supported Wi-Fi generation.
