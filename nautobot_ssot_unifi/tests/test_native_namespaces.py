@@ -8,7 +8,8 @@ from aiounifi.models.device import Device as UnifiDevice
 from aiounifi.models.site import Site
 from diffsync import Adapter
 from diffsync.enum import DiffSyncFlags
-from diffsync.exceptions import ObjectNotCreated
+from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
+from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -25,6 +26,7 @@ from nautobot.dcim.models import (
     Platform,
 )
 from nautobot.extras.models import JobResult, Role, Status, Tag
+from nautobot.extras.management import populate_status_choices
 from nautobot.ipam.models import IPAddress, IPAddressToInterface, Namespace, Prefix
 
 from nautobot_ssot_unifi.const import UNIFI_SSOT_TAG
@@ -41,6 +43,7 @@ class Snapshot(UnifiAdapterMixin, Adapter):
 
 class NativeNamespaceTests(TestCase):
     def setUp(self):
+        populate_status_choices(apps, None)
         self.tag, _ = Tag.objects.get_or_create(name=UNIFI_SSOT_TAG)
         self.status = Status.objects.get(name="Active")
         self.a = Namespace.objects.create(name="contract-a")
@@ -217,6 +220,51 @@ class NativeNamespaceTests(TestCase):
         device.refresh_from_db()
         self.assertEqual(device.primary_ip4_id, old)
         self.assertIsNone(device.primary_ip6_id)
+
+    def test_continuation_cannot_link_or_select_foreign_address(self):
+        device, interface = self.fixture()
+        old_primary = device.primary_ip4_id
+        foreign = self.address(self.a, "192.0.2.0/24", "192.0.2.10/24")
+        foreign.tags.remove(self.tag)
+        # Exercise native rejection and continuation, without mocking any writes.
+        failure = None
+        try:
+            self.sync(self.source(), DiffSyncFlags.SKIP_UNMATCHED_DST | DiffSyncFlags.CONTINUE_ON_FAILURE)
+        except ObjectNotUpdated as error:
+            failure = error
+        device.refresh_from_db()
+        self.assertFalse(IPAddressToInterface.objects.filter(ip_address=foreign, interface=interface).exists())
+        self.assertEqual(device.primary_ip4_id, old_primary)
+        self.assertIsNone(device.primary_ip6_id)
+        self.assertFalse(foreign.tags.filter(name=UNIFI_SSOT_TAG).exists())
+        self.assertIsNotNone(failure, "Ownership rejection must remain visible at completion")
+
+    def test_deferred_primary_rejects_foreign_address_even_if_already_assigned(self):
+        device, interface = self.fixture()
+        old_primary = device.primary_ip4_id
+        foreign = self.address(self.a, "192.0.2.0/24", "192.0.2.10/24")
+        foreign.tags.remove(self.tag)
+        IPAddressToInterface.objects.create(ip_address=foreign, interface=interface)
+        adapter = UnifiNautobotAdapter(job=self.job)
+        adapter._primary_ips = [
+            {
+                "device": self.source().get_all("device")[0].get_identifiers(),
+                "primary_ip4": {"host": "192.0.2.10", "parent__namespace__name": self.a.name},
+            }
+        ]
+        with self.assertRaises(ObjectNotUpdated):
+            adapter.sync_complete(source=None, adapter=None)
+        device.refresh_from_db()
+        self.assertEqual(device.primary_ip4_id, old_primary)
+
+    def test_assignment_create_rejects_foreign_interface(self):
+        _, interface = self.fixture()
+        address = self.address(self.a, "192.0.2.0/24", "192.0.2.10/24")
+        interface.tags.remove(self.tag)
+        link = self.source().get_all("ip_address_to_interface")[0]
+        with self.assertRaises(ObjectNotCreated):
+            IPAddressToInterfaceModel.create(UnifiNautobotAdapter(job=self.job), link.get_identifiers(), {})
+        self.assertFalse(IPAddressToInterface.objects.filter(ip_address=address, interface=interface).exists())
 
     def test_new_device_receives_primaries_after_native_assignment_creation(self):
         self.fixture()

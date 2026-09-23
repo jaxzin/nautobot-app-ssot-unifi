@@ -338,6 +338,22 @@ class IPAddressToInterfaceModel(NautobotModel):
     _attributes = tuple()
 
     @classmethod
+    def create(cls, adapter: "UnifiNautobotAdapter", ids, attrs):
+        """Require owned endpoints even when native sync continues after a failed create."""
+        parameters = {**ids, **attrs}
+        for relation, model in (("ip_address", IPAddressModel), ("interface", InterfaceModel)):
+            lookup = {
+                key.removeprefix(f"{relation}__"): value
+                for key, value in parameters.items()
+                if key.startswith(f"{relation}__")
+            }
+            try:
+                model.get_queryset().get(**lookup)
+            except model._model.DoesNotExist:
+                raise ObjectNotCreated("Assignment endpoints must exist and be UniFi-owned.") from None
+        return super().create(adapter, ids, attrs)
+
+    @classmethod
     def get_queryset(cls):
         """Read only assignments whose address and interface are UniFi-owned."""
         # Native assignment records do not support tags. Ownership belongs to

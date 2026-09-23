@@ -7,6 +7,7 @@ from asgiref.sync import sync_to_async, async_to_sync
 
 from diffsync.diff import Diff
 from diffsync.enum import DiffSyncFlags
+from diffsync.exceptions import ObjectNotUpdated
 from nautobot.apps.jobs import Job
 from nautobot.dcim.models import Device
 from nautobot.ipam.models import IPAddress
@@ -67,10 +68,16 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
     ) -> None:
         """Update devices with their primary IPs once the sync is complete."""
         for info in self._primary_ips:
-            device = Device.objects.get(**info["device"])
-            for ip in ["primary_ip4", "primary_ip6"]:
-                if ip in info:
-                    setattr(device, ip, IPAddress.objects.get(**info[ip]) if info[ip] else None)
+            try:
+                device = models.DeviceModel.get_queryset().get(**info["device"])
+                for ip in ["primary_ip4", "primary_ip6"]:
+                    if ip in info:
+                        address = models.IPAddressModel.get_queryset().get(**info[ip]) if info[ip] else None
+                        setattr(device, ip, address)
+            except (Device.DoesNotExist, IPAddress.DoesNotExist):
+                raise ObjectNotUpdated(
+                    "Primary selection requires an existing UniFi-owned device and address."
+                ) from None
             device.validated_save()
         self._primary_ips.clear()
 
