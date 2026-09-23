@@ -122,6 +122,8 @@ class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
         "platform__name",
         "primary_ip4__host",
         "primary_ip6__host",
+        "primary_ip4__parent__namespace__name",
+        "primary_ip6__parent__namespace__name",
     )
     _perform_delete = True
 
@@ -135,6 +137,8 @@ class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
     platform__name: str
     primary_ip4__host: Optional[str] = None
     primary_ip6__host: Optional[str] = None
+    primary_ip4__parent__namespace__name: Optional[str] = None
+    primary_ip6__parent__namespace__name: Optional[str] = None
 
     status_id: uuid.UUID = None
 
@@ -155,15 +159,53 @@ class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
         Returns:
             DeviceModel: The device model.
         """
-        if attrs["primary_ip4__host"] or attrs["primary_ip6__host"]:
-            adapter._primary_ips.append(
-                {
-                    "device": {**ids},
-                    "primary_ip4": attrs.pop("primary_ip4__host", None),
-                    "primary_ip6": attrs.pop("primary_ip6__host", None),
-                }
-            )
-        return super().create(adapter, ids, attrs)
+        attrs = dict(attrs)
+        primary_attrs = cls._pop_primary_attrs(attrs)
+        result = super().create(adapter, ids, attrs)
+        if result is not None:
+            result._defer_primary_attrs(adapter, primary_attrs)
+        return result
+
+    @classmethod
+    def _pop_primary_attrs(cls, attrs, current=None):
+        primary_attrs = {}
+        for family in ("primary_ip4", "primary_ip6"):
+            host_field = f"{family}__host"
+            namespace_field = f"{family}__parent__namespace__name"
+            if host_field in attrs or namespace_field in attrs:
+                host = attrs.pop(host_field, getattr(current, host_field, None))
+                namespace = attrs.pop(namespace_field, getattr(current, namespace_field, None))
+                primary_attrs[host_field] = host
+                primary_attrs[namespace_field] = namespace if host else None
+        return primary_attrs
+
+    def _defer_primary_attrs(self, adapter, attrs):
+        if not attrs:
+            return
+        info = {"device": self.get_identifiers()}
+        for family in ("primary_ip4", "primary_ip6"):
+            if f"{family}__host" in attrs:
+                host = attrs[f"{family}__host"]
+                info[family] = (
+                    {
+                        "host": host,
+                        "parent__namespace__name": attrs[f"{family}__parent__namespace__name"],
+                    }
+                    if host
+                    else None
+                )
+        adapter._primary_ips.append(info)
+        for field, value in attrs.items():
+            setattr(self, field, value)
+
+    def update(self, attrs):
+        """Defer primary updates until native interface assignments exist."""
+        attrs = dict(attrs)
+        primary_attrs = self._pop_primary_attrs(attrs, current=self)
+        result = super().update(attrs)
+        if result is not None:
+            self._defer_primary_attrs(self.adapter, primary_attrs)
+        return result
 
 
 class DeviceGroupModel(UnifiModelMixin, NautobotModel):
@@ -227,11 +269,12 @@ class PrefixModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
 
     _model = Prefix
     _modelname = "prefix"
-    _identifiers = ("network", "prefix_length")
+    _identifiers = ("namespace__name", "network", "prefix_length")
     _attributes = tuple()
 
     network: str
     prefix_length: int
+    namespace__name: str = "Global"
 
     status_id: uuid.UUID = None
     type: str = None
@@ -249,20 +292,33 @@ class IPAddressModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
     _model = IPAddress
     _modelname = "ip_address"
     _identifiers = (
+        "parent__namespace__name",
         "host",
-        "mask_length",
     )
     _attributes = (
+        "mask_length",
         "parent__network",
         "parent__prefix_length",
     )
 
     host: str
+    parent__namespace__name: str = "Global"
     mask_length: int
     parent__network: str
     parent__prefix_length: int
 
     status_id: uuid.UUID = None
+
+    def update(self, attrs):
+        """Resolve parent changes with their complete namespace-scoped identity."""
+        if "parent__network" in attrs or "parent__prefix_length" in attrs:
+            attrs = {
+                "parent__namespace__name": self.parent__namespace__name,
+                "parent__network": self.parent__network,
+                "parent__prefix_length": self.parent__prefix_length,
+                **attrs,
+            }
+        return super().update(attrs)
 
 
 class IPAddressToInterfaceModel(NautobotModel):
@@ -271,6 +327,7 @@ class IPAddressToInterfaceModel(NautobotModel):
     _model = IPAddressToInterface
     _modelname = "ip_address_to_interface"
     _identifiers = (
+        "ip_address__parent__namespace__name",
         "ip_address__host",
         "interface__label",
         "interface__device__name",
@@ -297,6 +354,7 @@ class IPAddressToInterfaceModel(NautobotModel):
         )
 
     ip_address__host: str
+    ip_address__parent__namespace__name: str = "Global"
     interface__label: str
     interface__device__name: str
     interface__device__controller_managed_device_group__name: str
