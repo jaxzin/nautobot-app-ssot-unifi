@@ -47,7 +47,9 @@ UNIFI_SSOT_TAG = "unifi-ssot"
 UNIFI_SSOT_INTERFACE_TYPES = {
     "ge": InterfaceTypeChoices.TYPE_1GE_FIXED,
     "2p5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,
+    "2.5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,
     "10ge": InterfaceTypeChoices.TYPE_10GE_FIXED,
     "sfp": InterfaceTypeChoices.TYPE_1GE_SFP,
+    "sfp+": InterfaceTypeChoices.TYPE_10GE_SFP_PLUS,
     "other": InterfaceTypeChoices.TYPE_OTHER,
 }

@@ -7,6 +7,7 @@ from asgiref.sync import sync_to_async, async_to_sync
 
 from diffsync.diff import Diff
 from diffsync.enum import DiffSyncFlags
+from diffsync.exceptions import ObjectNotUpdated
 from nautobot.apps.jobs import Job
 from nautobot.dcim.models import Device
 from nautobot.ipam.models import IPAddress
@@ -16,6 +17,8 @@ from structlog import BoundLogger
 
 from nautobot_ssot_unifi.const import UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
 from nautobot_ssot_unifi.ssot import models
+from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
+from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -65,18 +68,33 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
     ) -> None:
         """Update devices with their primary IPs once the sync is complete."""
         for info in self._primary_ips:
-            device = Device.objects.get(**info["device"])
-            for ip in ["primary_ip4", "primary_ip6"]:
-                if info[ip]:
-                    setattr(device, ip, IPAddress.objects.get(host=info[ip]))
+            try:
+                device = models.DeviceModel.get_queryset().get(**info["device"])
+                for ip in ["primary_ip4", "primary_ip6"]:
+                    if ip in info:
+                        address = models.IPAddressModel.get_queryset().get(**info[ip]) if info[ip] else None
+                        setattr(device, ip, address)
+            except (Device.DoesNotExist, IPAddress.DoesNotExist):
+                raise ObjectNotUpdated(
+                    "Primary selection requires an existing UniFi-owned device and address."
+                ) from None
             device.validated_save()
+        self._primary_ips.clear()
 
 
 class UnifiAdapter(UnifiAdapterMixin, Adapter):
     """Adapter to connect to Unifi."""
 
     def __init__(
-        self, *args, job: Job, controller_name: str, default_location_type: str, default_location_name: str, **kwargs
+        self,
+        *args,
+        job: Job,
+        controller_name: str,
+        default_location_type: str,
+        default_location_name: str,
+        namespace_name: str = "Global",
+        address_scope_resolver=None,
+        **kwargs,
     ):
         """Initialize the unifi source adapter.
 
@@ -89,14 +107,18 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             controller_name (str): The device controller name.
             default_location_type (str): The name of the location type to use when creating new locations.
             default_location_name (str): The name of the location to use when the Unifi site is `default`.
+            namespace_name (str): The existing Namespace for imported networks and addresses.
+            address_scope_resolver: Validated optional per-address namespace rules.
             **kwargs: Additional keyword arguments needed by the parent DiffSync adapter.
         """
-        super(*args, **kwargs).__init__()
+        self.debug = kwargs.pop("debug", False)
+        super().__init__(*args, **kwargs)
         self.job = job
         self.controller_name = controller_name
         self.default_location_type = default_location_type
         self.default_location_name = default_location_name
-        self.debug = kwargs.get("debug", False)
+        self.namespace_name = namespace_name
+        self.address_scope_resolver = address_scope_resolver or AddressScopeResolver(None, namespace_name)
 
     @sync_to_async
     def _debug(self, *args, **kwargs):
@@ -116,8 +138,10 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
 
     async def _assign_ip(self, ip: str, netmask: str, interface: str) -> IPNetwork:
         ip_address = IPNetwork(f"{ip}/{netmask}")
+        namespace_name = self.address_scope_resolver.resolve(str(ip_address.ip))
         prefix, created = self.get_or_add_model_instance(
             self.prefix(
+                namespace__name=namespace_name,
                 network=str(ip_address.network),
                 prefix_length=ip_address.prefixlen,
             )
@@ -127,6 +151,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
 
         _, created = self.get_or_add_model_instance(
             self.ip_address(
+                parent__namespace__name=namespace_name,
                 host=str(ip_address.ip),
                 mask_length=ip_address.prefixlen,
                 parent__network=str(ip_address.network),
@@ -136,8 +161,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.add(interface)
         if created:
             assignment = self.ip_address_to_interface(
+                ip_address__parent__namespace__name=namespace_name,
                 **{f"interface__{key}": value for key, value in interface.get_identifiers().items()},
-                ip_address__host=ip,
+                ip_address__host=str(ip_address.ip),
             )
             self.add(assignment)
         return ip_address
@@ -206,15 +232,21 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 )
                 await self._debug("Adding device %s", device)
                 self.add(device)
-                for port in unifi_device.port_table:
-                    media = port.get("media")
+                interfaces = _interface_records(unifi_device.raw)
+                config_network = unifi_device.raw["config_network"]
+                if (
+                    config_network
+                    and config_network["type"] == "static"
+                    and any(row["name"] == "mgmt" for row in interfaces)
+                ):
+                    # A source interface name alone cannot bind the controller's
+                    # device-level address to that interface.
+                    raise ValueError("Reported management interface conflicts with synthetic management interface.")
+                for port in interfaces:
                     interface = self._create_interface(
                         device,
                         port["name"],
-                        UNIFI_SSOT_INTERFACE_TYPES.get(
-                            media.lower() if isinstance(media, str) else "other",
-                            UNIFI_SSOT_INTERFACE_TYPES["other"],
-                        ),
+                        port["type"],
                         port["port_idx"],
                     )
                     if port.get("ip") and port.get("netmask"):
@@ -232,5 +264,11 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     )
                     if ip_address.version == 4:
                         device.primary_ip4__host = str(ip_address.ip)
+                        device.primary_ip4__parent__namespace__name = self.address_scope_resolver.resolve(
+                            str(ip_address.ip)
+                        )
                     else:
                         device.primary_ip6__host = str(ip_address.ip)
+                        device.primary_ip6__parent__namespace__name = self.address_scope_resolver.resolve(
+                            str(ip_address.ip)
+                        )
