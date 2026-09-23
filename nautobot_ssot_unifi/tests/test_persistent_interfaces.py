@@ -13,7 +13,7 @@ from nautobot_ssot_unifi.unifi.client import Client
 
 
 class PersistentInterfaceTests(TestCase):
-    def load(self, **tables):
+    def load(self, namespace=None, address_scope_resolver=None, **tables):
         raw = {
             "name": "test-device",
             "model": "TEST",
@@ -24,11 +24,16 @@ class PersistentInterfaceTests(TestCase):
         }
         adapter = UnifiAdapter(
             job=SimpleNamespace(
-                controller=SimpleNamespace(name="Controller"), hardware_models={}, logger=logging.getLogger(__name__)
+                controller=SimpleNamespace(name="Controller"),
+                hardware_models={},
+                logger=logging.getLogger(__name__),
+                namespace=SimpleNamespace(name=namespace) if namespace else None,
             ),
             controller_name="Controller",
             default_location_type="Site",
             default_location_name="Home",
+            namespace_name=namespace or "Global",
+            address_scope_resolver=address_scope_resolver,
         )
 
         async def sites(_client):

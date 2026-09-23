@@ -15,13 +15,16 @@ import nautobot  # noqa: E402
 nautobot.setup()
 
 suite = unittest.defaultTestLoader.loadTestsFromNames(
-    [
+    sys.argv[1:]
+    or [
         "nautobot_ssot_unifi.tests.test_persistent_interfaces",
         "nautobot_ssot_unifi.tests.test_source_lifecycle",
         "nautobot_ssot_unifi.tests.test_client_transport",
         "nautobot_ssot_unifi.tests.test_job_transport",
         "nautobot_ssot_unifi.tests.test_primary_ips",
         "nautobot_ssot_unifi.tests.test_inventory_ownership",
+        "nautobot_ssot_unifi.tests.test_namespaces",
+        "nautobot_ssot_unifi.tests.test_address_scopes",
     ]
 )
 result = unittest.TextTestRunner(verbosity=2).run(suite)
