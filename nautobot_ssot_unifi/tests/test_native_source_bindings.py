@@ -318,6 +318,7 @@ class NativeBindingTests(TestCase):
             top_level = ("device",)
 
         source = Snapshot()
+        source._held = []
         for obj, source_id, name in [
             (self.device, "device-a", "failed-change"),
             (other, "device-b", "committed-change"),
@@ -359,6 +360,7 @@ class NativeBindingTests(TestCase):
                 )
             self.assertTrue(job._failed, "Native Job failure flag must drive the runner's failure status")
             self.assertTrue(job.sync.logs.filter(status__in=["failure", "error"]).exists())
+            self.assertTrue(job.job_result.files.filter(name="unifi-held.json").exists())
             self.device.refresh_from_db()
             other.refresh_from_db()
             self.assertEqual(self.device.name, "contract-device")

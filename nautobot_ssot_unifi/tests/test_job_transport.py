@@ -62,3 +62,4 @@ class JobTransportTests(TestCase):
         self.assertEqual(load.call_args.kwargs["host"], "controller.example")
         self.assertEqual(load.call_args.kwargs["port"], 8443)
         self.assertIs(load.call_args.kwargs["verify_cert"], True)
+        self.assertTrue(getattr(job, "_unifi_collection_complete", False))

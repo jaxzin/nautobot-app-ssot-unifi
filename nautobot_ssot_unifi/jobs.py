@@ -20,6 +20,7 @@ from nautobot_ssot.jobs.base import DataSource
 from nautobot_ssot_unifi.ssot import adapters
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot._vlans import _group_bindings
+from nautobot_ssot_unifi.ssot._held import _publish_held
 
 name = "Unifi SSoT"  # pylint: disable=invalid-name
 
@@ -143,6 +144,7 @@ class UnifiDataSource(DataSource, Job):
             verify_cert=external_integration.verify_ssl,
             timeout=external_integration.timeout,
         )
+        self._unifi_collection_complete = True
 
     def load_target_adapter(self):
         """Load data from Nautobot into DiffSync models."""
@@ -175,6 +177,7 @@ class UnifiDataSource(DataSource, Job):
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
+        self._unifi_collection_complete = False
         for name, flag in (
             ("sync_firmware", sync_firmware),
             ("sync_vlans", sync_vlans),
@@ -201,7 +204,11 @@ class UnifiDataSource(DataSource, Job):
             for record in reader:
                 self.hardware_models[record["model"]] = record
 
-        super().run(dryrun=self.dryrun, *args, **kwargs)
+        try:
+            super().run(dryrun=self.dryrun, *args, **kwargs)
+        finally:
+            if getattr(self, "source_adapter", None) is not None:
+                _publish_held(self)
 
 
 register_jobs(UnifiDataSource)

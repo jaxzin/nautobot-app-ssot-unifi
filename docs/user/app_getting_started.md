@@ -11,6 +11,7 @@ To install the App, please follow the instructions detailed in the [Installation
 - An existing Controller with a location and an External Integration for the UniFi endpoint.
 - A Secrets Group on that integration containing HTTP username and password entries for a read-only account.
 - Existing destination Namespaces. Leaving **Namespace** empty selects the existing `Global` namespace.
+- A JSON MetadataType named **UniFi inventory ownership**, attached to Device, Interface, and VLAN. Existing Devices and Interfaces need reviewed exact source-ID bindings before import; names, serials, and MACs alone do not authorize adoption.
 
 The Job uses the External Integration's TLS verification and timeout settings. Keep certificate verification enabled for a controller with a trusted certificate.
 
@@ -23,6 +24,8 @@ The Job uses the External Integration's TLS verification and timeout settings. K
 5. If the diff is correct, run with the same inputs and Dryrun disabled. Verify the imported addresses, their interface assignments, and each device's primary address in the intended namespace.
 
 Objects already present outside UniFi ownership are not adopted. When a source host is reported more than once in the same namespace, its first source assignment wins. Destination objects absent from the source are retained.
+
+Firmware, VLAN membership, and observed neighbors are optional. See [Import firmware, VLANs, and neighbors](app_use_cases.md) for their inputs, schema prerequisites, and held-item troubleshooting.
 
 ## Select namespaces by address
 
