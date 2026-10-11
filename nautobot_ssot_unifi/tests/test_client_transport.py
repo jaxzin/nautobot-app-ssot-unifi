@@ -40,3 +40,24 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
             self.assertEqual([device.mac for device in second], ["00:00:00:00:00:02"])
         finally:
             await client.logout()
+
+    async def test_login_does_not_collect_household_clients(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        requests = []
+
+        async def login():
+            return None
+
+        async def response(request):
+            requests.append(request)
+            if len(requests) != 1 or request.path != "/stat/device":
+                raise AssertionError("Unexpected source collection channel.")
+            return {"data": []}
+
+        try:
+            with patch.object(client.api, "login", login), patch.object(client.api, "request", response):
+                self.assertEqual(list(await client.get_devices()), [])
+                self.assertTrue(client.logged_in)
+                self.assertEqual(len(requests), 1)
+        finally:
+            await client.logout()

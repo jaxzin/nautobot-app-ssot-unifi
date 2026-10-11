@@ -27,7 +27,6 @@ def require_login(method):
     async def wrapper(self, *args, **kwargs):
         if not self.logged_in:
             await self.api.login()
-            await self.api.clients.update()
             self.logged_in = True
         return await method(self, *args, **kwargs)
 
