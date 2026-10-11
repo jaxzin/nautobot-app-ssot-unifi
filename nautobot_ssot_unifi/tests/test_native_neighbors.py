@@ -132,6 +132,28 @@ class NativeNeighborTests(TestCase):
         self.assertIsNone(_read_observation(self.interface.pk, self.integration.pk, "site-a"))
         self.assertIsNotNone(_read_observation(self.peer.pk, self.integration.pk, "site-a"))
 
+    def test_later_sample_cannot_overwrite_a_changed_observation_baseline(self):
+        from diffsync.exceptions import ObjectNotUpdated
+
+        stale_source = self.source([(self.interface, [])], self.now + timedelta(seconds=60))
+        stale_proofs = dict(self.job._unifi_neighbor_proofs)
+        stale_target = UnifiNautobotAdapter(job=self.job)
+        stale_target.top_level = stale_source.top_level
+        stale_target.load()
+        # Another sync commits a peer after this run's read-only snapshot.
+        self.sync(self.source([(self.interface, [self.peer])], self.now + timedelta(seconds=30)))
+        current = _read_observation(self.interface.pk, self.integration.pk, "site-a")
+        self.job._unifi_neighbor_proofs = stale_proofs
+        desired = stale_source.get("neighbor", str(self.interface.pk))
+        existing = stale_target.get_all("neighbor")
+        with self.assertRaises((ObjectNotCreated, ObjectNotUpdated)):
+            if existing:
+                existing[0].update(desired.get_attrs())
+            else:
+                stale_target.neighbor.create(stale_target, desired.get_identifiers(), desired.get_attrs())
+        self.assertEqual(_read_observation(self.interface.pk, self.integration.pk, "site-a"), current)
+        self.assertEqual(RelationshipAssociation.objects.count(), 1)
+
     def test_foreign_observation_owner_and_changed_native_parent_block_writes(self):
         source = self.source([(self.interface, [self.peer])])
         metadata = ObjectMetadata(

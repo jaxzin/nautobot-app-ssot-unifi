@@ -169,3 +169,53 @@ class NativeVlanTests(TestCase):
         self.assertNotIn("vlan", target.top_level)
         self.assertNotIn("mode", target.interface._attributes)
         self.assertEqual(self.interface.untagged_vlan.vlan_group_id, self.group.pk)
+
+    def test_held_source_vlan_cannot_disappear_from_enumerated_membership(self):
+        rows = [
+            {"_id": "net-a", "name": "A", "vlan": 10},
+            {"_id": "net-b", "name": "B", "vlan": 20},
+            {"_id": "net-c", "name": "C", "vlan": 30},
+        ]
+        port = {"native_networkconf_id": "net-a", "tagged_vlan_mgmt": "custom", "excluded_networkconf_ids": ["net-b"]}
+        self.sync(self.source(rows, port))
+        retained = list(self.interface.tagged_vlans.values_list("pk", flat=True))
+        foreign_type = MetadataType.objects.create(name="Other VLAN owner", data_type="json")
+        foreign_type.content_types.add(ContentType.objects.get_for_model(VLAN))
+        foreign = ObjectMetadata(
+            metadata_type=foreign_type, assigned_object=VLAN.objects.get(name="C"), scoped_fields=[]
+        )
+        foreign.value = {
+            "schema_version": 1,
+            "integration_id": "00000000-0000-4000-8000-000000000002",
+            "field_paths": ["name"],
+        }
+        foreign.validated_save()
+        source = self.source(rows, port)
+        self.assertTrue(
+            any(row["kind"] == "vlan-membership" and row["reason"] == "incomplete-membership" for row in source._held)
+        )
+        self.sync(source)
+        self.assertEqual(list(self.interface.tagged_vlans.values_list("pk", flat=True)), retained)
+
+    def test_foreign_interface_claim_holds_only_membership(self):
+        from nautobot.dcim.models import Interface
+
+        foreign_type = MetadataType.objects.create(name="Other Interface owner", data_type="json")
+        foreign_type.content_types.add(ContentType.objects.get_for_model(Interface))
+        foreign = ObjectMetadata(metadata_type=foreign_type, assigned_object=self.interface, scoped_fields=[])
+        foreign.value = {
+            "schema_version": 1,
+            "integration_id": "00000000-0000-4000-8000-000000000002",
+            "field_paths": ["mode"],
+        }
+        foreign.validated_save()
+        source = self.source(
+            [{"_id": "net-a", "name": "A", "vlan": 10}],
+            {"native_networkconf_id": "net-a", "tagged_vlan_mgmt": "block_all"},
+        )
+        self.assertEqual(source._held[-1]["reason"], "foreign-owner")
+        self.assertEqual(source._held[-1]["kind"], "vlan-membership")
+        self.sync(source)
+        self.assertTrue(VLAN.objects.filter(name="A").exists())
+        self.interface.refresh_from_db()
+        self.assertEqual(self.interface.mode, "")

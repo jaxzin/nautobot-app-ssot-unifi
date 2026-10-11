@@ -91,6 +91,8 @@ def _membership(port, profiles, overrides, networks):
     if not isinstance(native, str) or (native and native not in networks):
         raise _VlanHold("incomplete-membership")
     untagged = networks[native] if native else None
+    if native and untagged is None:
+        raise _VlanHold("incomplete-membership")
     tagged = []
     if "tagged_vlan_mgmt" in effective:
         policy = effective["tagged_vlan_mgmt"]
@@ -119,5 +121,7 @@ def _membership(port, profiles, overrides, networks):
                 raise _VlanHold("incomplete-membership")
             tagged = [networks[key] for key in keys]
     else:
+        raise _VlanHold("incomplete-membership")
+    if any(value is None for value in tagged):
         raise _VlanHold("incomplete-membership")
     return mode, untagged, sorted(set(tagged), key=str)

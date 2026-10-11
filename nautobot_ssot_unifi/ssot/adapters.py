@@ -254,7 +254,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self._held.extend(
             {"kind": "vlan", "site_id": site_id, "source_id": source_id, "reason": reason} for source_id, reason in held
         )
-        networks = {}
+        # Keep the complete source universe, including networks held during
+        # native resolution. None means unresolved, never absent from a policy.
+        networks = {row["_id"]: None for row in raw_networks}
         for row in rows:
             try:
                 target_id = self.job._unifi_bindings.plan(
@@ -302,7 +304,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 model=Interface,
                 paths=("mode", "untagged_vlan", "tagged_vlans"),
             )
-        except (_VlanHold, _FirmwareHold) as error:
+        except (_VlanHold, _FirmwareHold, _BindingHold) as error:
             self._held.append(
                 {"kind": "vlan-membership", "site_id": site_id, "source_id": source_id, "reason": error.reason}
             )

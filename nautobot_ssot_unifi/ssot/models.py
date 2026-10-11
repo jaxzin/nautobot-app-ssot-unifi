@@ -495,6 +495,11 @@ class NeighborModel(NautobotModel):
             with transaction.atomic():
                 session.lock()
                 previous = _read_observation(self.id, session.integration_id, proof["site_id"], lock=True)
+                if previous != self.neighbor_observations:
+                    # This diff was computed against a different observation
+                    # baseline. Fail this reporter instead of erasing history
+                    # committed by a concurrent run; the next preview reloads it.
+                    raise _NeighborHold("incomplete-neighbor-evidence")
                 _fresh(
                     proof["device"], proof["now"], _utc(previous["last_complete_collection_at"]) if previous else None
                 )
