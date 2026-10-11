@@ -92,7 +92,7 @@ class AddressScopeTests(TestCase):
 
     def test_null_rules_use_selected_namespace_and_empty_rules_admit_nothing(self):
         self.assertEqual(self.resolver(None).resolve("203.0.113.1"), "Global")
-            with self.assertRaisesRegex(ValueError, "^UniFi managed-devices collection failed\\.$"):
+        with self.assertRaisesRegex(ValueError, "match"):
             self.resolver([]).resolve("192.0.2.1")
 
     def test_same_namespace_overlaps_are_allowed_but_conflicting_matches_fail(self):
@@ -150,7 +150,7 @@ class AddressScopeTests(TestCase):
             config_network={"type": "static", "ip": "2001:db8::1", "netmask": "64"},
         )
         self.assertEqual(source6.get_all("device")[0].primary_ip6__parent__namespace__name, "routing-b")
-        with self.assertRaisesRegex(ValueError, "match"):
+        with self.assertRaisesRegex(ValueError, "^UniFi managed-devices collection failed\\.$"):
             test_persistent_interfaces.PersistentInterfaceTests().load(
                 address_scope_resolver=resolver,
                 ethernet_table=[{"name": "eth0", "ip": "203.0.113.1", "netmask": "24"}],
