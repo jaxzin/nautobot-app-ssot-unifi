@@ -11,7 +11,6 @@ from nautobot_ssot.jobs.base import DataSource
 from nautobot_ssot_unifi.jobs import UnifiDataSource
 from nautobot_ssot_unifi.tests import test_persistent_interfaces
 
-
 A = "00000000-0000-4000-8000-000000000004"
 B = "00000000-0000-4000-8000-000000000005"
 
@@ -118,7 +117,8 @@ class AddressScopeTests(TestCase):
         )
         self.assertEqual(len(source.get_all("ip_address")), 1)
         self.assertEqual(source.get_all("ip_address")[0].mask_length, 24)
-        self.assertEqual([link.interface__label for link in source.get_all("ip_address_to_interface")], ["eth0"])
+        linked_ids = [link.interface__id for link in source.get_all("ip_address_to_interface")]
+        self.assertEqual([source.get("interface", str(target)).label for target in linked_ids], ["eth0"])
         source = test_persistent_interfaces.PersistentInterfaceTests().load(
             address_scope_resolver=self.resolver([]), ethernet_table=[{"name": "eth0"}]
         )

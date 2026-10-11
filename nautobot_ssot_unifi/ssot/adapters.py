@@ -8,6 +8,7 @@ from asgiref.sync import sync_to_async, async_to_sync
 from diffsync.diff import Diff
 from diffsync.enum import DiffSyncFlags
 from diffsync.exceptions import ObjectNotUpdated
+from django.db import transaction
 from nautobot.apps.jobs import Job
 from nautobot.dcim.models import Device
 from nautobot.ipam.models import IPAddress
@@ -19,6 +20,7 @@ from nautobot_ssot_unifi.const import UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
 from nautobot_ssot_unifi.ssot import models
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
+from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -59,6 +61,19 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         super().__init__(*args, job=job, sync=sync, **kwargs)
         self._primary_ips = []
 
+    def _load_objects(self, diffsync_model):
+        if diffsync_model._modelname in {"device", "interface"}:
+            targets = self.job._unifi_bindings.targets(diffsync_model._modelname)
+            for obj in diffsync_model._get_queryset().filter(pk__in=targets):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        if diffsync_model._modelname == "ip_address_to_interface":
+            targets = self.job._unifi_bindings.targets("interface")
+            for obj in diffsync_model._get_queryset().filter(interface_id__in=targets):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        return super()._load_objects(diffsync_model)
+
     def sync_complete(
         self,
         source: Adapter,
@@ -69,16 +84,19 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         """Update devices with their primary IPs once the sync is complete."""
         for info in self._primary_ips:
             try:
-                device = models.DeviceModel.get_queryset().get(**info["device"])
-                for ip in ["primary_ip4", "primary_ip6"]:
-                    if ip in info:
-                        address = models.IPAddressModel.get_queryset().get(**info[ip]) if info[ip] else None
-                        setattr(device, ip, address)
-            except (Device.DoesNotExist, IPAddress.DoesNotExist):
+                with transaction.atomic():
+                    self.job._unifi_bindings.lock()
+                    device = models.DeviceModel.get_queryset().select_for_update().get(**info["device"])
+                    self.job._unifi_bindings.check("device", device.pk)
+                    for ip in ["primary_ip4", "primary_ip6"]:
+                        if ip in info:
+                            address = models.IPAddressModel.get_queryset().get(**info[ip]) if info[ip] else None
+                            setattr(device, ip, address)
+                    device.validated_save()
+            except (Device.DoesNotExist, IPAddress.DoesNotExist, _BindingHold):
                 raise ObjectNotUpdated(
                     "Primary selection requires an existing UniFi-owned device and address."
                 ) from None
-            device.validated_save()
         self._primary_ips.clear()
 
 
@@ -119,6 +137,34 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.default_location_name = default_location_name
         self.namespace_name = namespace_name
         self.address_scope_resolver = address_scope_resolver or AddressScopeResolver(None, namespace_name)
+        self._held = []
+
+    @sync_to_async
+    def _prepare_bindings(self):
+        self.job._unifi_bindings = _BindingSession(self.job.controller.external_integration.pk)
+
+    @sync_to_async
+    def _target_id(self, kind, site_id, source_id, collision_lookup):
+        try:
+            return self.job._unifi_bindings.plan(kind, site_id, source_id, collision_lookup)
+        except _BindingHold as error:
+            self._held.append({"kind": kind, "site_id": site_id, "source_id": source_id, "reason": error.reason})
+            return None
+
+    @sync_to_async
+    def _retain_primaries(self, device):
+        """Project last-good values when the source provides no management evidence."""
+        native = (
+            Device.objects.filter(pk=device.id)
+            .select_related("primary_ip4__parent__namespace", "primary_ip6__parent__namespace")
+            .first()
+        )
+        if native is None:
+            return
+        for family in ("primary_ip4", "primary_ip6"):
+            address = getattr(native, family)
+            setattr(device, f"{family}__host", address.host if address else None)
+            setattr(device, f"{family}__parent__namespace__name", address.parent.namespace.name if address else None)
 
     @sync_to_async
     def _debug(self, *args, **kwargs):
@@ -128,8 +174,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
     def _info(self, *args, **kwargs):
         self.job.logger.info(*args, **kwargs)
 
-    def _create_interface(self, device, interface_name, interface_type, port_id):
+    def _create_interface(self, device, interface_name, interface_type, port_id, target_id):
         return self.interface(
+            id=target_id,
             **{f"device__{key}": value for key, value in device.get_identifiers().items()},
             label=interface_name,
             type=interface_type,
@@ -180,6 +227,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             timeout=timeout,
         )
         try:
+            await self._prepare_bindings()
             await self._load_sites()
         finally:
             await self.client.logout()
@@ -194,6 +242,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             )
         )
         for site in await self.client.get_sites():
+            site_id = site.site_id
             site_name = site.name
             self.client.current_site = site_name
             location_type__name = self.default_location_type
@@ -204,6 +253,15 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             self.add(site)
 
             for unifi_device in await self.client.get_devices():
+                device_source_id = unifi_device.raw["_id"]
+                device_id = await self._target_id(
+                    "device",
+                    site_id,
+                    device_source_id,
+                    {"name": unifi_device.name, "location__name": site.name},
+                )
+                if device_id is None:
+                    continue
                 unifi_info = self.job.hardware_models.get(unifi_device.model, {})
                 unifi_type = unifi_device.type
                 if unifi_type == "usw":
@@ -221,6 +279,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     await self._debug("Added device type %s", device_type)
 
                 device = self.device(
+                    id=device_id,
                     name=unifi_device.name,
                     controller_managed_device_group__name="default",
                     controller_managed_device_group__controller__name=self.job.controller.name,
@@ -233,7 +292,19 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 await self._debug("Adding device %s", device)
                 self.add(device)
                 interfaces = _interface_records(unifi_device.raw)
-                config_network = unifi_device.raw["config_network"]
+                self.job._unifi_bindings.observe_interfaces(
+                    site_id,
+                    device_source_id,
+                    {
+                        _interface_id(device_source_id, port_idx=row["port_idx"], ifname=row["ifname"])
+                        for row in interfaces
+                    },
+                )
+                config_network = unifi_device.raw.get("config_network")
+                if not config_network:
+                    await self._retain_primaries(device)
+                elif not isinstance(config_network, dict) or config_network.get("type") not in {"static", "dhcp"}:
+                    raise ValueError("Invalid UniFi management addressing evidence.")
                 if (
                     config_network
                     and config_network["type"] == "static"
@@ -243,20 +314,35 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     # device-level address to that interface.
                     raise ValueError("Reported management interface conflicts with synthetic management interface.")
                 for port in interfaces:
+                    source_id = _interface_id(device_source_id, port_idx=port["port_idx"], ifname=port["ifname"])
+                    target_id = await self._target_id(
+                        "interface", site_id, source_id, {"device_id": device.id, "name": port["name"]}
+                    )
+                    if target_id is None:
+                        continue
                     interface = self._create_interface(
                         device,
                         port["name"],
                         port["type"],
                         port["port_idx"],
+                        target_id,
                     )
                     if port.get("ip") and port.get("netmask"):
                         await self._assign_ip(port["ip"], port["netmask"], interface)
                     else:
                         self.add(interface)
 
-                if unifi_device.raw["config_network"] and unifi_device.raw["config_network"]["type"] == "static":
-                    interface = self._create_interface(device, "mgmt", UNIFI_SSOT_INTERFACE_TYPES["other"], -1)
-                    await self._debug("Setting management interface info: %s", unifi_device.raw["config_network"])
+                if config_network and config_network["type"] == "static":
+                    target_id = await self._target_id(
+                        "interface", site_id, _management_id(device_source_id), {"device_id": device.id, "name": "mgmt"}
+                    )
+                    if target_id is None:
+                        # An unresolved address holder must not clear last-good primaries.
+                        await self._retain_primaries(device)
+                        continue
+                    interface = self._create_interface(
+                        device, "mgmt", UNIFI_SSOT_INTERFACE_TYPES["other"], -1, target_id
+                    )
                     ip_address = await self._assign_ip(
                         unifi_device.raw["config_network"]["ip"],
                         unifi_device.raw["config_network"]["netmask"],

@@ -25,7 +25,7 @@ from nautobot.dcim.models import (
     Manufacturer,
     Platform,
 )
-from nautobot.extras.models import JobResult, Role, Status, Tag
+from nautobot.extras.models import ExternalIntegration, JobResult, MetadataType, ObjectMetadata, Role, Status, Tag
 from nautobot.extras.management import populate_status_choices
 from nautobot.ipam.models import IPAddress, IPAddressToInterface, Namespace, Prefix
 
@@ -34,6 +34,7 @@ from nautobot_ssot_unifi.jobs import UnifiDataSource
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapterMixin, UnifiNautobotAdapter
 from nautobot_ssot_unifi.ssot.models import IPAddressModel, IPAddressToInterfaceModel, PrefixModel
 from nautobot_ssot_unifi.unifi.client import Client
+from nautobot_ssot_unifi.ssot._bindings import _BindingSession
 import structlog
 
 
@@ -49,6 +50,30 @@ class NativeNamespaceTests(TestCase):
         self.a = Namespace.objects.create(name="contract-a")
         self.b = Namespace.objects.create(name="contract-b")
         self.job = SimpleNamespace(namespace=self.a, logger=logging.getLogger(__name__))
+        self.integration = ExternalIntegration.objects.create(
+            id="00000000-0000-0000-0000-000000000001", name="contract-binding"
+        )
+        metadata_type = MetadataType.objects.create(name="UniFi inventory ownership", data_type="json")
+        metadata_type.content_types.set(
+            [ContentType.objects.get_for_model(Device), ContentType.objects.get_for_model(Interface)]
+        )
+        self.job._unifi_bindings = _BindingSession(self.integration.pk)
+
+    def bind(self, target, source_id, site_id="site-a"):
+        metadata = ObjectMetadata(
+            metadata_type=MetadataType.objects.get(name="UniFi inventory ownership"),
+            assigned_object=target,
+            scoped_fields=[],
+        )
+        metadata.value = {
+            "schema_version": 1,
+            "integration_id": str(self.integration.pk),
+            "site_id": site_id,
+            "source_object_id": source_id,
+            "field_paths": [],
+        }
+        metadata.validated_save()
+        return metadata
 
     def test_scoped_parent_update_preserves_address_identity(self):
         addresses = []
@@ -73,7 +98,7 @@ class NativeNamespaceTests(TestCase):
             )
         self.assertNotEqual(*addresses)
 
-    def fixture(self):
+    def fixture(self, bound=True):
         role = Role.objects.create(name="contract-role")
         role.content_types.add(ContentType.objects.get_for_model(Device))
         maker = Manufacturer.objects.create(name="contract-maker")
@@ -96,6 +121,9 @@ class NativeNamespaceTests(TestCase):
         device.tags.add(self.tag)
         interface = Interface.objects.create(device=device, name="eth0", label="eth0", type="other", status=self.status)
         interface.tags.add(self.tag)
+        if bound:
+            self.bind(device, "device-a")
+            self.bind(interface, '["device-a","ifname","eth0"]')
         old = self.address(self.a, "203.0.113.0/24", "203.0.113.1/24")
         IPAddressToInterface.objects.create(ip_address=old, interface=interface)
         device.primary_ip4 = old
@@ -115,7 +143,17 @@ class NativeNamespaceTests(TestCase):
     def source(self, namespace=None, device_name="contract-device"):
         namespace = namespace or self.a
         source = Snapshot()
+        self.job._unifi_bindings = _BindingSession(self.integration.pk)
+        session = self.job._unifi_bindings
+        source_id = "device-a" if device_name == "contract-device" else "device-new"
+        target_id = session.plan(
+            "device", "site-a", source_id, {"name": device_name, "location__name": "contract-site"}
+        )
+        interface_id = session.plan(
+            "interface", "site-a", f'["{source_id}","ifname","eth0"]', {"device_id": target_id, "name": "eth0"}
+        )
         device = source.device(
+            id=target_id,
             name=device_name,
             controller_managed_device_group__name="default",
             controller_managed_device_group__controller__name="contract-controller",
@@ -131,7 +169,10 @@ class NativeNamespaceTests(TestCase):
         )
         source.add(device)
         interface = source.interface(
-            label="eth0", type="other", **{f"device__{key}": value for key, value in device.get_identifiers().items()}
+            id=interface_id,
+            label="eth0",
+            type="other",
+            **{f"device__{key}": value for key, value in device.get_identifiers().items()},
         )
         source.add(interface)
         for host, network, mask in (("192.0.2.10", "192.0.2.0", 24), ("2001:db8::10", "2001:db8::", 64)):
@@ -281,6 +322,7 @@ class NativeNamespaceTests(TestCase):
             name="contract-controller",
             location=device.location,
             external_integration=SimpleNamespace(
+                pk=self.integration.pk,
                 remote_url="https://controller.invalid",
                 verify_ssl=True,
                 timeout=1,
@@ -289,12 +331,13 @@ class NativeNamespaceTests(TestCase):
         )
 
         async def sites(_client):
-            return [Site({"name": "default"})]
+            return [Site({"name": "default", "_id": "site-a"})]
 
         async def devices(_client):
             return [
                 UnifiDevice(
                     {
+                        "_id": "device-a",
                         "name": "contract-device",
                         "model": "TEST",
                         "type": "uap",

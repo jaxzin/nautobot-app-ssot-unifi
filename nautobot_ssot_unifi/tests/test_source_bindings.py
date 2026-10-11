@@ -3,6 +3,7 @@
 from unittest import TestCase
 from uuid import UUID
 
+from nautobot_ssot_unifi.ssot import _bindings
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingIndex, _interface_id
 
 INTEGRATION = "00000000-0000-0000-0000-000000000001"
@@ -28,6 +29,23 @@ def record(target=TARGET, kind="device", site="site-a", source="device-a", integ
 
 
 class InterfaceIdentityTests(TestCase):
+    def test_logical_management_binding_cannot_alias_a_real_nic(self):
+        management = _bindings._management_id("device-a")
+        self.assertEqual(management, '["device-a","management","config_network"]')
+        index = _BindingIndex([record(kind="interface", source=management)])
+        self.assertEqual(index.resolve("interface", INTEGRATION, "site-a", management), UUID(TARGET))
+        self.assertFalse(_bindings._physical_interface_id(management))
+        self.assertTrue(_bindings._physical_interface_id('["device-a","ifname","mgmt"]'))
+        with self.assertRaises(_BindingHold):
+            index.resolve("interface", INTEGRATION, "site-a", '["device-a","ifname","mgmt"]')
+
+    def test_management_identifier_rejects_invalid_parent_and_arbitrary_channel(self):
+        with self.assertRaises(ValueError):
+            _bindings._management_id("test-only-sensitive\n")
+        for source in ['["device-a","management","other"]', '["device-a", "management", "config_network"]']:
+            with self.assertRaises(ValueError):
+                _BindingIndex([record(kind="interface", source=source)])
+
     def test_port_index_wins_over_editable_display_information(self):
         self.assertEqual(_interface_id("device-a", port_idx=3, ifname="eth0"), '["device-a","port_idx",3]')
         self.assertEqual(_interface_id("device-a", port_idx=0), '["device-a","port_idx",0]')

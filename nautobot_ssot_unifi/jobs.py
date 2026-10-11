@@ -137,6 +137,12 @@ class UnifiDataSource(DataSource, Job):
         self.target_adapter = adapters.UnifiNautobotAdapter(job=self, sync=self.sync)
         self.target_adapter.load()
 
+    def execute_sync(self):
+        """Keep roll-forward work and derive Job failure from native SSoT history."""
+        super().execute_sync()
+        if self.sync.logs.filter(status__in=["failure", "error"]).exists():
+            self.fail("UniFi inventory sync has failed native writes; completed independent updates are retained.")
+
     def run(
         self,
         dryrun,

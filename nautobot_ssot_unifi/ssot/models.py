@@ -3,7 +3,8 @@
 from typing import TYPE_CHECKING, Annotated, Optional
 import uuid
 
-from diffsync.exceptions import ObjectNotCreated
+from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated, ObjectNotDeleted
+from django.db import transaction
 from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation
 
 from nautobot.extras.models import Tag, Status
@@ -12,6 +13,7 @@ from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface
 from nautobot.ipam.choices import PrefixTypeChoices
 
 from nautobot_ssot_unifi.const import UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
+from nautobot_ssot_unifi.ssot._bindings import _BindingHold
 
 if TYPE_CHECKING:
     from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
@@ -104,17 +106,61 @@ class DeviceTypeModel(UnifiModelMixin, NautobotModel):
     part_number: str = ""
 
 
-class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
+class _BoundModelMixin:
+    """Keep native SSoT writes, guarded by exact ownership in each transaction."""
+
+    @classmethod
+    def get_queryset(cls):
+        return super().get_queryset().filter(tags__name=UNIFI_SSOT_TAG)
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        session = adapter.job._unifi_bindings
+        try:
+            with transaction.atomic():
+                session.lock()
+                if cls._modelname == "interface":
+                    session.check_parent(ids["id"], attrs["device__id"])
+                result = session.admit(
+                    cls._modelname, ids["id"], lambda: super(_BoundModelMixin, cls).create(adapter, ids, attrs)
+                )
+                obj = cls._model.objects.get(pk=ids["id"])
+                obj.tags.add(Tag.objects.get(name=UNIFI_SSOT_TAG))
+                result.pk = obj.pk
+                return result
+        except _BindingHold as error:
+            raise ObjectNotCreated(error.reason) from None
+
+    def update(self, attrs):
+        session = self.adapter.job._unifi_bindings
+        try:
+            with transaction.atomic():
+                session.lock()
+                session.check(self._modelname, self.id)
+                self._model.objects.select_for_update().get(pk=self.id)
+                # Do not reuse a stale ORM object cached during preview.
+                self.adapter.cache.invalidate_cache()
+                if self._modelname == "interface":
+                    session.check_native_parent(self.id, attrs.get("device__id", self.device__id))
+                return super().update(attrs)
+        except _BindingHold as error:
+            raise ObjectNotUpdated(error.reason) from None
+
+    def delete(self):
+        """This inventory increment never deletes a Device or Interface."""
+        raise ObjectNotDeleted("Automatic UniFi inventory deletion is not enabled.")
+
+
+class DeviceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     """Device model."""
 
     _model = Device
     _modelname = "device"
-    _identifiers = (
+    _identifiers = ("id",)
+    _attributes = (
         "name",
         "controller_managed_device_group__name",
         "controller_managed_device_group__controller__name",
-    )
-    _attributes = (
         "device_type__model",
         "role__name",
         "location__name",
@@ -127,6 +173,7 @@ class DeviceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
     )
     _perform_delete = True
 
+    id: uuid.UUID
     name: str
     controller_managed_device_group__name: str = None
     controller_managed_device_group__controller__name: str = None
@@ -223,29 +270,24 @@ class DeviceGroupModel(UnifiModelMixin, NautobotModel):
     name: str
 
 
-class InterfaceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
-    """DeviceGroup model."""
+class InterfaceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
+    """Native UUID identity, separate from the editable source label."""
 
     _model = Interface
     _modelname = "interface"
-    _identifiers = (
-        "label",
-        "device__name",
-        "device__controller_managed_device_group__name",
-        "device__controller_managed_device_group__controller__name",
-    )
-
+    _identifiers = ("id",)
     _attributes = (
+        "label",
+        "device__id",
         "type",
         "unifi_port_id",
     )
     _perform_delete = True
 
+    id: uuid.UUID
     label: str
     name: str = ""
-    device__name: str
-    device__controller_managed_device_group__name: str
-    device__controller_managed_device_group__controller__name: str
+    device__id: uuid.UUID
 
     type: str
     unifi_port_id: Annotated[Optional[int], CustomFieldAnnotation(name="unifi_port_id")] = None
@@ -260,7 +302,7 @@ class InterfaceModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):
         can be changed (so that Napalm stuff matches Nautobot) but the ssot job
         can still find the interfaces.
         """
-        attrs["name"] = ids["label"]
+        attrs = {**attrs, "name": attrs["label"]}
         return super().create(adapter, ids, attrs)
 
 
@@ -329,10 +371,7 @@ class IPAddressToInterfaceModel(NautobotModel):
     _identifiers = (
         "ip_address__parent__namespace__name",
         "ip_address__host",
-        "interface__label",
-        "interface__device__name",
-        "interface__device__controller_managed_device_group__name",
-        "interface__device__controller_managed_device_group__controller__name",
+        "interface__id",
     )
 
     _attributes = tuple()
@@ -340,6 +379,12 @@ class IPAddressToInterfaceModel(NautobotModel):
     @classmethod
     def create(cls, adapter: "UnifiNautobotAdapter", ids, attrs):
         """Require owned endpoints even when native sync continues after a failed create."""
+        with transaction.atomic():
+            adapter.job._unifi_bindings.lock()
+            return cls._create_assignment(adapter, ids, attrs)
+
+    @classmethod
+    def _create_assignment(cls, adapter, ids, attrs):
         parameters = {**ids, **attrs}
         for relation, model in (("ip_address", IPAddressModel), ("interface", InterfaceModel)):
             lookup = {
@@ -351,6 +396,11 @@ class IPAddressToInterfaceModel(NautobotModel):
                 model.get_queryset().get(**lookup)
             except model._model.DoesNotExist:
                 raise ObjectNotCreated("Assignment endpoints must exist and be UniFi-owned.") from None
+        try:
+            adapter.job._unifi_bindings.check("interface", parameters["interface__id"])
+            adapter.job._unifi_bindings.check_native_parent(parameters["interface__id"])
+        except _BindingHold as error:
+            raise ObjectNotCreated(error.reason) from None
         return super().create(adapter, ids, attrs)
 
     @classmethod
@@ -371,7 +421,4 @@ class IPAddressToInterfaceModel(NautobotModel):
 
     ip_address__host: str
     ip_address__parent__namespace__name: str = "Global"
-    interface__label: str
-    interface__device__name: str
-    interface__device__controller_managed_device_group__name: str
-    interface__device__controller_managed_device_group__controller__name: str
+    interface__id: uuid.UUID
