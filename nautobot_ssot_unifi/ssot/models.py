@@ -5,16 +5,27 @@ import uuid
 
 from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated, ObjectNotDeleted
 from django.db import transaction
+from django.core.exceptions import ValidationError
 from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation, ObjectMetadataAnnotation
 
-from nautobot.extras.models import Tag, Status
+from nautobot.extras.models import Tag, Status, Relationship, RelationshipAssociation
 from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface, SoftwareVersion
 from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface, VLAN
 from nautobot.ipam.choices import PrefixTypeChoices
 
 from nautobot_ssot_unifi.const import UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
-from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _OWNERSHIP_TYPE
-from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _claim_available
+from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _OWNERSHIP_TYPE, _physical_interface_id
+from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold
+from nautobot_ssot_unifi.ssot._ownership import _claim_available
+from nautobot_ssot_unifi.ssot._neighbors import (
+    _NeighborHold,
+    _fresh,
+    _pair,
+    _read_observation,
+    _utc,
+    _OBSERVATION_TYPE,
+    _RELATIONSHIP_KEY,
+)
 
 if TYPE_CHECKING:
     from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
@@ -429,6 +440,114 @@ class VLANModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     unifi_ownership: Annotated[
         dict[str, Any], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
     ]
+
+
+class NeighborModel(NautobotModel):
+    """Native metadata comparison; one atomic association/document write per reporter."""
+
+    _model = Interface
+    _modelname = "neighbor"
+    _identifiers = ("id",)
+    _attributes = ("neighbor_observations",)
+    id: uuid.UUID
+    neighbor_observations: Annotated[
+        Optional[dict[str, Any]], ObjectMetadataAnnotation(metadata_type_name=_OBSERVATION_TYPE, data_type="json")
+    ] = None
+
+    @classmethod
+    def get_queryset(cls):
+        """Restrict observation targets to source-owned admitted Interfaces."""
+        return super().get_queryset().filter(tags__name=UNIFI_SSOT_TAG)
+
+    @classmethod
+    def _update_obj_with_parameters(cls, obj, parameters, adapter):
+        """Use the framework's metadata writer without saving the inventory NIC."""
+        if set(parameters) != {"neighbor_observations"}:
+            raise ValueError("Unsupported UniFi neighbor mutation.")
+        cls._set_object_metadata_fields(
+            {
+                "neighbor_observations": (
+                    cls.get_attr_annotation("neighbor_observations"),
+                    parameters["neighbor_observations"],
+                )
+            },
+            obj,
+            adapter,
+        )
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Create an observation on an already admitted Interface, not a new NIC."""
+        instance = cls(adapter=adapter, pk=ids["id"], **ids)
+        try:
+            return instance.update(attrs)
+        except ObjectNotUpdated:
+            raise ObjectNotCreated("UniFi neighbor reporter transaction failed.") from None
+
+    def update(self, attrs):
+        """Associations and metadata either commit together or both roll back."""
+        from django.db.models import Q
+
+        session = self.adapter.job._unifi_bindings
+        proof = self.adapter.job._unifi_neighbor_proofs[self.id]
+        document = attrs["neighbor_observations"]
+        try:
+            with transaction.atomic():
+                session.lock()
+                previous = _read_observation(self.id, session.integration_id, proof["site_id"], lock=True)
+                _fresh(
+                    proof["device"], proof["now"], _utc(previous["last_complete_collection_at"]) if previous else None
+                )
+                session.check("interface", self.id)
+                session.check_native_parent(self.id)
+                from nautobot_ssot_unifi.ssot._neighbors import _prerequisites
+
+                _prerequisites()
+                relationship = Relationship.objects.get(key=_RELATIONSHIP_KEY)
+                endpoints = {self.id} | {
+                    uuid.UUID(peer["peer_interface_id"]) for peer in document["peers"] if peer["presence"] == "observed"
+                }
+                for target in sorted(endpoints, key=str):
+                    session.check("interface", target)
+                    session.check_native_parent(target)
+                    if not _physical_interface_id(session._document("interface", target)["source_object_id"]):
+                        raise _NeighborHold("unsupported-endpoint")
+                    interface = Interface.objects.select_for_update().get(pk=target)
+                    if not interface.type or "base-" not in interface.type:
+                        raise _NeighborHold("unsupported-endpoint")
+                for peer in document["peers"]:
+                    if peer["presence"] != "observed":
+                        continue
+                    first, second = _pair(self.id, peer["peer_interface_id"])
+                    associations = RelationshipAssociation.objects.filter(relationship=relationship).filter(
+                        Q(source_id=first, destination_id=second) | Q(source_id=second, destination_id=first)
+                    )
+                    if associations.count() > 1:
+                        raise ValueError("Invalid UniFi neighbor association prerequisite.")
+                    if not associations.exists():
+                        association = RelationshipAssociation(
+                            relationship=relationship,
+                            source_type=relationship.source_type,
+                            destination_type=relationship.destination_type,
+                            source_id=first,
+                            destination_id=second,
+                        )
+                        association.validated_save()
+                self.adapter.cache.invalidate_cache()
+                return super().update(attrs)
+        except (
+            _BindingHold,
+            _NeighborHold,
+            ValueError,
+            ValidationError,
+            Interface.DoesNotExist,
+            Relationship.DoesNotExist,
+        ):
+            raise ObjectNotUpdated("UniFi neighbor reporter transaction failed.") from None
+
+    def delete(self):
+        """Last-known edges and observation documents are not deleted by this Job."""
+        raise ObjectNotDeleted("UniFi neighbor observations are retained.")
 
 
 class PrefixModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):

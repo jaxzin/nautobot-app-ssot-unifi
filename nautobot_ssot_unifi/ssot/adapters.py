@@ -1,6 +1,7 @@
 """Adapters for diffsync models between Unifi and Nautobot."""
 
 from typing import Any, Dict, List
+from datetime import datetime, timezone
 from diffsync import Adapter
 
 from asgiref.sync import sync_to_async, async_to_sync
@@ -22,8 +23,10 @@ from nautobot_ssot_unifi.ssot import models
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
-from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _claim_available, _version
+from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
+from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership, _VlanHold
+from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -53,7 +56,7 @@ class UnifiAdapterMixin:
         "ip_address_to_interface",
     )
 
-    def _configure_firmware(self, job):
+    def _configure_extensions(self, job):
         self.sync_firmware = getattr(job, "sync_firmware", False) is True
         if self.sync_firmware:
             self.device = models.FirmwareDeviceModel
@@ -64,6 +67,10 @@ class UnifiAdapterMixin:
             self.interface = models.VlanInterfaceModel
             self.vlan = models.VLANModel
             self.top_level = ("vlan",) + self.top_level
+        self.sync_neighbors = getattr(job, "sync_neighbors", False) is True
+        if self.sync_neighbors:
+            self.neighbor = models.NeighborModel
+            self.top_level = self.top_level + ("neighbor",)
 
 
 class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
@@ -75,9 +82,14 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         """Initialize the adapter."""
         super().__init__(*args, job=job, sync=sync, **kwargs)
         self._primary_ips = []
-        self._configure_firmware(job)
+        self._configure_extensions(job)
 
     def _load_objects(self, diffsync_model):
+        if diffsync_model._modelname == "neighbor":
+            targets = self.job._unifi_neighbor_proofs
+            for obj in diffsync_model._get_queryset().filter(pk__in=targets):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
         if diffsync_model._modelname in {"device", "interface", "vlan"}:
             targets = self.job._unifi_bindings.targets(diffsync_model._modelname)
             for obj in diffsync_model._get_queryset().filter(pk__in=targets):
@@ -164,17 +176,24 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.debug = kwargs.pop("debug", False)
         super().__init__(*args, **kwargs)
         self.job = job
-        self._configure_firmware(job)
+        self._configure_extensions(job)
         self.controller_name = controller_name
         self.default_location_type = default_location_type
         self.default_location_name = default_location_name
         self.namespace_name = namespace_name
         self.address_scope_resolver = address_scope_resolver or AddressScopeResolver(None, namespace_name)
         self._held = []
+        self._neighbor_devices = {}
+        self._neighbor_interfaces = {}
+        self.job._unifi_neighbor_proofs = {}
 
     @sync_to_async
     def _prepare_bindings(self):
         self.job._unifi_bindings = _BindingSession(self.job.controller.external_integration.pk)
+        if self.sync_neighbors:
+            from nautobot_ssot_unifi.ssot._neighbors import _prerequisites
+
+            _prerequisites()
 
     @sync_to_async
     def _target_id(self, kind, site_id, source_id, collision_lookup):
@@ -214,7 +233,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             if not Platform.objects.filter(name=device.platform__name).exists():
                 raise _FirmwareHold("missing-platform")
             _claim_available(device.id, self.job._unifi_bindings.integration_id)
-        except _FirmwareHold as error:
+        except (_FirmwareHold, _BindingHold) as error:
             self._held.append({"kind": "firmware", "site_id": site_id, "source_id": source_id, "reason": error.reason})
             self.job._unifi_bindings.retained_firmware[device.id] = device
             return
@@ -297,6 +316,136 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         interface.tagged_vlans = [{"id": value} for value in tagged]
 
     @sync_to_async
+    def _load_neighbors(self):
+        import re
+
+        now = self._collection_completed_at
+        session = self.job._unifi_bindings
+
+        def endpoint(site_id, chassis, port, kind):
+            if not re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", chassis):
+                raise _NeighborHold("unresolved-endpoint")
+            devices = self._neighbor_devices[site_id]
+            matches = [
+                source_id
+                for source_id, raw in devices.items()
+                if isinstance(raw.get("mac"), str) and raw["mac"].lower() == chassis.lower()
+            ]
+            if len(matches) != 1:
+                raise _NeighborHold("unresolved-endpoint")
+            source_device = matches[0]
+            candidates = []
+            for (site, device, source_id), (interface, record) in self._neighbor_interfaces.items():
+                if site != site_id or device != source_device:
+                    continue
+                matched = record["port_idx"] == port if kind == "port_idx" else record["ifname"] == port
+                # A peer's explicit Ethernet alias may refer to its stable port
+                # index. This joins vendor source facts; never native names/MACs.
+                if kind == "ifname" and not matched:
+                    aliases = devices[source_device].get("ethernet_table", [])
+                    matched = any(
+                        isinstance(alias, dict)
+                        and alias.get("name") == port
+                        and type(alias.get("port_idx")) is int
+                        and alias["port_idx"] == record["port_idx"]
+                        for alias in aliases
+                    )
+                if matched:
+                    candidates.append(interface)
+            if len(candidates) != 1:
+                raise _NeighborHold("unresolved-endpoint")
+            if "base-" not in candidates[0].type:
+                raise _NeighborHold("unsupported-endpoint")
+            return candidates[0].id
+
+        for (site_id, device_id, source_id), (interface, record) in self._neighbor_interfaces.items():
+            try:
+                if "base-" not in interface.type:
+                    raise _NeighborHold("unsupported-endpoint")
+                raw = self._neighbor_devices[site_id][device_id]
+                port_rows = [
+                    row
+                    for row in raw.get("port_table", [])
+                    if isinstance(row, dict)
+                    and (
+                        (record["port_idx"] is not None and row.get("port_idx") == record["port_idx"])
+                        or (record["port_idx"] is None and row.get("ifname") == record["ifname"])
+                    )
+                ]
+                port = dict(port_rows[0]) if len(port_rows) == 1 else {}
+                if "lldp_table" in raw:
+                    rows = raw["lldp_table"]
+                    if not isinstance(rows, list) or any(
+                        not isinstance(row, dict)
+                        or (
+                            type(row.get("local_port_idx")) is not int
+                            and not isinstance(row.get("local_port_name"), str)
+                        )
+                        for row in rows
+                    ):
+                        raise _NeighborHold("incomplete-neighbor-evidence")
+                    selected = [
+                        row
+                        for row in rows
+                        if (record["port_idx"] is not None and row.get("local_port_idx") == record["port_idx"])
+                        or (record["ifname"] is not None and row.get("local_port_name") == record["ifname"])
+                    ]
+                    if any(
+                        (
+                            record["port_idx"] is not None
+                            and "local_port_idx" in row
+                            and row["local_port_idx"] != record["port_idx"]
+                        )
+                        or (
+                            record["ifname"] is not None
+                            and "local_port_name" in row
+                            and row["local_port_name"] != record["ifname"]
+                        )
+                        for row in selected
+                    ):
+                        raise _NeighborHold("incomplete-neighbor-evidence")
+                    if any(row.get("is_wired") is not True for row in selected):
+                        raise _NeighborHold("unsupported-endpoint")
+                    if "lldp_table" in port:
+                        local = port["lldp_table"]
+                        if not isinstance(local, list) or any(not isinstance(row, dict) for row in local):
+                            raise _NeighborHold("incomplete-neighbor-evidence")
+
+                        def keys(entries):
+                            return sorted(
+                                (
+                                    row.get("lldp_chassis_id", row.get("chassis_id", "")),
+                                    row.get("lldp_port_id", row.get("port_id", "")),
+                                )
+                                for row in entries
+                            )
+
+                        if keys(local) != keys(selected):
+                            raise _NeighborHold("incomplete-neighbor-evidence")
+                    port["lldp_table"] = selected
+                previous = _read_observation(interface.id, session.integration_id, site_id)
+                peers = _evidence(
+                    raw,
+                    port,
+                    now,
+                    _utc(previous["last_complete_collection_at"]) if previous else None,
+                    lambda chassis, port, kind: endpoint(site_id, chassis, port, kind),
+                )
+                for peer_id in peers:
+                    _pair(interface.id, peer_id)
+                self.job._unifi_neighbor_proofs[interface.id] = {
+                    "device": {key: raw[key] for key in ("state", "last_seen", "next_heartbeat_at")},
+                    "now": now,
+                    "site_id": site_id,
+                }
+                document = _observation(previous, session.integration_id, site_id, peers, now)
+                self.add(self.neighbor(id=interface.id, neighbor_observations=document))
+            except (_NeighborHold, _BindingHold) as error:
+                self._held.append(
+                    {"kind": "neighbor", "site_id": site_id, "source_id": source_id, "reason": error.reason}
+                )
+
+    @sync_to_async
     def _debug(self, *args, **kwargs):
         self.job.logger.debug(*args, **kwargs)
 
@@ -364,6 +513,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             self._collection_channel = "bindings"
             await self._prepare_bindings()
             await self._load_sites()
+            if self.sync_neighbors:
+                self._collection_channel = "neighbor-evidence"
+                await self._load_neighbors()
         except ValidationError:
             raise
         except Exception:
@@ -405,7 +557,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             self.add(site)
 
             self._collection_channel = "managed-devices"
-            for unifi_device in await self.client.get_devices():
+            devices = list(await self.client.get_devices())
+            if self.sync_neighbors:
+                self._collection_completed_at = datetime.now(timezone.utc)
+                self._neighbor_devices[site_id] = {device.raw["_id"]: device.raw for device in devices}
+                if len(self._neighbor_devices[site_id]) != len(devices):
+                    raise ValueError("Duplicate UniFi managed-device source identity.")
+            for unifi_device in devices:
                 device_source_id = unifi_device.raw["_id"]
                 device_id = await self._target_id(
                     "device",
@@ -482,6 +640,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                         port["port_idx"],
                         target_id,
                     )
+                    if self.sync_neighbors:
+                        self._neighbor_interfaces[(site_id, device_source_id, source_id)] = (interface, port)
                     if self.sync_vlans:
                         rows = [
                             row
