@@ -8,6 +8,23 @@ from nautobot_ssot_unifi.unifi.client import Client
 
 
 class ClientTransportTests(IsolatedAsyncioTestCase):
+    async def test_vlan_channel_is_get_only_and_discards_credentials(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        requests = []
+
+        async def response(request):
+            requests.append((request.method, request.path, request.data))
+            return {"data": [{"_id": "safe-id", "name": "LAN", "vlan": 10, "x_secret": "synthetic-secret"}]}
+
+        try:
+            with patch.object(client.api, "request", response):
+                networks, profiles = await client._get_vlan_configuration()
+            self.assertEqual(requests, [("get", "/rest/networkconf", None), ("get", "/rest/portconf", None)])
+            self.assertNotIn("synthetic-secret", repr((networks, profiles)))
+        finally:
+            await client.logout()
+
     async def test_verification_is_enforced_by_aiounifi(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         try:

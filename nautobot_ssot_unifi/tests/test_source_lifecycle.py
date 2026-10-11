@@ -70,11 +70,12 @@ class SourceLifecycleTests(TestCase):
 
     def test_connection_is_closed_when_source_read_fails(self):
         async def sites(_client):
-            raise RuntimeError("source unavailable")
+            raise RuntimeError("source unavailable: synthetic-secret and response body")
 
         with patch.object(Client, "get_sites", sites):
-            with self.assertRaisesRegex(RuntimeError, "source unavailable"):
+            with self.assertRaisesRegex(ValueError, "^UniFi site-discovery collection failed\\.$") as caught:
                 self.load()
+            self.assertNotIn("synthetic-secret", str(caught.exception))
 
         self.assertTrue(self.adapter.client.session.closed)
 

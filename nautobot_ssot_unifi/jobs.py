@@ -19,6 +19,7 @@ from nautobot_ssot.jobs.base import DataSource
 
 from nautobot_ssot_unifi.ssot import adapters
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
+from nautobot_ssot_unifi.ssot._vlans import _group_bindings
 
 name = "Unifi SSoT"  # pylint: disable=invalid-name
 
@@ -174,12 +175,18 @@ class UnifiDataSource(DataSource, Job):
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
-        if any(type(flag) is not bool for flag in (sync_firmware, sync_vlans, sync_neighbors)):
-            raise ValueError("UniFi inventory opt-ins must be booleans.")
+        for name, flag in (
+            ("sync_firmware", sync_firmware),
+            ("sync_vlans", sync_vlans),
+            ("sync_neighbors", sync_neighbors),
+        ):
+            if type(flag) is not bool:
+                raise ValidationError({name: "Must be a boolean."})
         self.sync_firmware = sync_firmware
         self.sync_vlans = sync_vlans
         self.sync_neighbors = sync_neighbors
         self.vlan_groups = vlan_groups
+        self._unifi_vlan_groups = _group_bindings(vlan_groups) if sync_vlans else {}
         self.namespace = namespace if namespace is not None else Namespace.objects.get(name="Global")
         self.address_scope_resolver = AddressScopeResolver(address_scopes, self.namespace.name)
         self.default_location = default_location or controller.location

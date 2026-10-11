@@ -1,6 +1,6 @@
 """Nautobot DiffSync models for Unifi SSoT."""
 
-from typing import TYPE_CHECKING, Annotated, Optional, Any
+from typing import TYPE_CHECKING, Annotated, Optional, Any, TypedDict
 import uuid
 
 from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated, ObjectNotDeleted
@@ -9,7 +9,7 @@ from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation, ObjectMe
 
 from nautobot.extras.models import Tag, Status
 from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface, SoftwareVersion
-from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface
+from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface, VLAN
 from nautobot.ipam.choices import PrefixTypeChoices
 
 from nautobot_ssot_unifi.const import UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
@@ -157,6 +157,16 @@ class _BoundModelMixin:
             or "software_version" in ownership.get("field_paths", [])
         ):
             _claim_available(target_id, adapter.job._unifi_bindings.integration_id, lock=True)
+        if cls._modelname in {"interface", "vlan"}:
+            paths = (
+                ("mode", "untagged_vlan", "tagged_vlans")
+                if cls._modelname == "interface"
+                else ("name", "vid", "vlan_group", "status")
+            )
+            if "unifi_ownership" in attrs or any(key.split("__")[0] in paths for key in attrs):
+                _claim_available(
+                    target_id, adapter.job._unifi_bindings.integration_id, lock=True, model=cls._model, paths=paths
+                )
 
     def delete(self):
         """This inventory increment never deletes a Device or Interface."""
@@ -365,6 +375,60 @@ class InterfaceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
         """
         attrs = {**attrs, "name": attrs["label"]}
         return super().create(adapter, ids, attrs)
+
+
+class _VlanReference(TypedDict):
+    id: uuid.UUID
+
+
+class VlanInterfaceModel(InterfaceModel):
+    """Opt-in complete native VLAN membership with a transactional claim."""
+
+    _attributes = InterfaceModel._attributes + ("mode", "untagged_vlan__id", "tagged_vlans", "unifi_ownership")
+    mode: str = ""
+    untagged_vlan__id: Optional[uuid.UUID] = None
+    tagged_vlans: list[_VlanReference] = []
+    unifi_ownership: Annotated[
+        Optional[dict[str, Any]], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
+    ] = None
+
+    def update(self, attrs):
+        """A held dataset cannot overwrite membership even after target loading."""
+        attrs = dict(attrs)
+        fields = self._attributes[len(InterfaceModel._attributes) :]
+        if self.id in self.adapter.job._unifi_bindings.retained_membership:
+            for field in fields:
+                attrs.pop(field, None)
+        elif any(field in attrs for field in fields):
+            for field in fields:
+                attrs.setdefault(field, getattr(self, field))
+        return super().update(attrs)
+
+    @classmethod
+    def _update_obj_with_parameters(cls, obj, parameters, adapter):
+        # Native validation sees the desired mode, not a stale tagged set that
+        # would forbid an otherwise valid tagged -> access transition.
+        if "mode" in parameters and obj.pk and Interface.objects.filter(pk=obj.pk).exists():
+            obj.tagged_vlans.clear()
+        return super()._update_obj_with_parameters(obj, parameters, adapter)
+
+
+class VLANModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
+    """Exact source network identity, distinct from mutable VID and name."""
+
+    _model = VLAN
+    _modelname = "vlan"
+    _identifiers = ("id",)
+    _attributes = ("name", "vid", "vlan_group__id", "status__name", "unifi_ownership")
+    id: uuid.UUID
+    name: str
+    vid: int
+    vlan_group__id: uuid.UUID
+    status__name: str = "Active"
+    status_id: Optional[uuid.UUID] = None
+    unifi_ownership: Annotated[
+        dict[str, Any], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
+    ]
 
 
 class PrefixModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):

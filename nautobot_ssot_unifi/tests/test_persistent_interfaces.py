@@ -173,7 +173,7 @@ class PersistentInterfaceTests(TestCase):
                     )
 
     def test_reported_mgmt_does_not_implicitly_adopt_synthetic_management_address(self):
-        with self.assertRaisesRegex(ValueError, "management interface"):
+        with self.assertRaisesRegex(ValueError, "^UniFi managed-devices collection failed\\.$"):
             self.load(
                 ethernet_table=[{"name": "mgmt"}],
                 config_network={"type": "static", "ip": "192.0.2.1", "netmask": "255.255.255.0"},

@@ -8,6 +8,7 @@ import aiohttp
 from aiounifi.controller import Controller as UnifiController
 from aiounifi.models.configuration import Configuration as UnifiConfiguration
 from aiounifi.models.device import Device, DeviceListRequest
+from aiounifi.models.api import ApiRequest
 
 if TYPE_CHECKING:
     from aiounifi.models.site import Site
@@ -101,3 +102,28 @@ class Client:
         # A fresh snapshot avoids the event cache retaining devices from a previous site.
         response = await self.api.request(DeviceListRequest.create())
         return [Device(raw) for raw in response["data"]]
+
+    @require_login
+    async def _get_vlan_configuration(self):
+        """GET only; discard unrelated/credential-bearing configuration fields."""
+        projections = []
+        for path, fields in (
+            ("/rest/networkconf", {"_id", "name", "vlan", "vlan_enabled"}),
+            (
+                "/rest/portconf",
+                {
+                    "_id",
+                    "native_networkconf_id",
+                    "tagged_vlan_mgmt",
+                    "excluded_networkconf_ids",
+                    "forward",
+                    "tagged_networkconf_ids",
+                },
+            ),
+        ):
+            response = await self.api.request(ApiRequest(method="get", path=path))
+            rows = response.get("data")
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ValueError("Invalid UniFi VLAN configuration channel.")
+            projections.append([{key: row[key] for key in fields if key in row} for row in rows])
+        return tuple(projections)

@@ -9,6 +9,7 @@ from diffsync.diff import Diff
 from diffsync.enum import DiffSyncFlags
 from diffsync.exceptions import ObjectNotUpdated
 from django.db import transaction
+from django.core.exceptions import ValidationError
 from nautobot.apps.jobs import Job
 from nautobot.dcim.models import Device, Platform
 from nautobot.ipam.models import IPAddress
@@ -22,6 +23,7 @@ from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _claim_available, _version
+from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership, _VlanHold
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -57,6 +59,11 @@ class UnifiAdapterMixin:
             self.device = models.FirmwareDeviceModel
             self.software_version = models.SoftwareVersionModel
             self.top_level = ("software_version",) + self.top_level
+        self.sync_vlans = getattr(job, "sync_vlans", False) is True
+        if self.sync_vlans:
+            self.interface = models.VlanInterfaceModel
+            self.vlan = models.VLANModel
+            self.top_level = ("vlan",) + self.top_level
 
 
 class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
@@ -71,7 +78,7 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         self._configure_firmware(job)
 
     def _load_objects(self, diffsync_model):
-        if diffsync_model._modelname in {"device", "interface"}:
+        if diffsync_model._modelname in {"device", "interface", "vlan"}:
             targets = self.job._unifi_bindings.targets(diffsync_model._modelname)
             for obj in diffsync_model._get_queryset().filter(pk__in=targets):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
@@ -85,6 +92,11 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
                 if retained is not None and diffsync_model._modelname == "device":
                     target = self.get("device", str(obj.pk))
                     for field in models.FirmwareDeviceModel._attributes[len(models.DeviceModel._attributes) :]:
+                        setattr(retained, field, getattr(target, field))
+                retained = self.job._unifi_bindings.retained_membership.get(obj.pk)
+                if retained is not None and diffsync_model._modelname == "interface":
+                    target = self.get("interface", str(obj.pk))
+                    for field in models.VlanInterfaceModel._attributes[len(models.InterfaceModel._attributes) :]:
                         setattr(retained, field, getattr(target, field))
             return
         if diffsync_model._modelname == "ip_address_to_interface":
@@ -214,6 +226,77 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         device.unifi_ownership = document
 
     @sync_to_async
+    def _load_vlans(self, site_id, raw_networks):
+        from django.db.models import Q
+        from nautobot.ipam.models import VLAN
+
+        group = self.job._unifi_vlan_groups[site_id]
+        rows, held = _networks(raw_networks)
+        self._held.extend(
+            {"kind": "vlan", "site_id": site_id, "source_id": source_id, "reason": reason} for source_id, reason in held
+        )
+        networks = {}
+        for row in rows:
+            try:
+                target_id = self.job._unifi_bindings.plan(
+                    "vlan", site_id, row["source_id"], {"vlan_group_id": group, "vid": row["vid"]}
+                )
+                if (
+                    VLAN.objects.filter(vlan_group_id=group)
+                    .exclude(pk=target_id)
+                    .filter(Q(vid=row["vid"]) | Q(name=row["name"]))
+                    .exists()
+                ):
+                    raise _VlanHold("duplicate-vlan")
+                _claim_available(
+                    target_id,
+                    self.job._unifi_bindings.integration_id,
+                    model=VLAN,
+                    paths=("name", "vid", "vlan_group", "status"),
+                )
+            except (_BindingHold, _FirmwareHold, _VlanHold) as error:
+                self._held.append(
+                    {"kind": "vlan", "site_id": site_id, "source_id": row["source_id"], "reason": error.reason}
+                )
+                continue
+            document = self.job._unifi_bindings.documents[("vlan", target_id)]
+            document["field_paths"] = ["name", "status", "vid", "vlan_group"]
+            self.add(
+                self.vlan(
+                    id=target_id, name=row["name"], vid=row["vid"], vlan_group__id=group, unifi_ownership=document
+                )
+            )
+            networks[row["source_id"]] = target_id
+        return networks
+
+    @sync_to_async
+    def _load_membership(self, interface, site_id, source_id, port, profiles, overrides, networks):
+        from nautobot.dcim.models import Interface
+
+        document = dict(self.job._unifi_bindings.documents[("interface", interface.id)])
+        interface.unifi_ownership = document
+        try:
+            mode, untagged, tagged = _membership(port, profiles, overrides, networks)
+            _claim_available(
+                interface.id,
+                self.job._unifi_bindings.integration_id,
+                model=Interface,
+                paths=("mode", "untagged_vlan", "tagged_vlans"),
+            )
+        except (_VlanHold, _FirmwareHold) as error:
+            self._held.append(
+                {"kind": "vlan-membership", "site_id": site_id, "source_id": source_id, "reason": error.reason}
+            )
+            self.job._unifi_bindings.retained_membership[interface.id] = interface
+            return
+        document["field_paths"] = sorted(set(document["field_paths"]) | {"mode", "untagged_vlan", "tagged_vlans"})
+        self.job._unifi_bindings.documents[("interface", interface.id)] = document
+        self.job._unifi_bindings.retained_membership.pop(interface.id, None)
+        interface.mode = mode
+        interface.untagged_vlan__id = untagged
+        interface.tagged_vlans = [{"id": value} for value in tagged]
+
+    @sync_to_async
     def _debug(self, *args, **kwargs):
         self.job.logger.debug(*args, **kwargs)
 
@@ -222,13 +305,17 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.job.logger.info(*args, **kwargs)
 
     def _create_interface(self, device, interface_name, interface_type, port_id, target_id):
-        return self.interface(
+        interface = self.interface(
             id=target_id,
             **{f"device__{key}": value for key, value in device.get_identifiers().items()},
             label=interface_name,
             type=interface_type,
             unifi_port_id=port_id,
         )
+        if self.sync_vlans:
+            interface.unifi_ownership = dict(self.job._unifi_bindings.documents[("interface", target_id)])
+            self.job._unifi_bindings.retained_membership[target_id] = interface
+        return interface
 
     async def _assign_ip(self, ip: str, netmask: str, interface: str) -> IPNetwork:
         ip_address = IPNetwork(f"{ip}/{netmask}")
@@ -274,8 +361,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             timeout=timeout,
         )
         try:
+            self._collection_channel = "bindings"
             await self._prepare_bindings()
             await self._load_sites()
+        except ValidationError:
+            raise
+        except Exception:
+            raise ValueError(f"UniFi {self._collection_channel} collection failed.") from None
         finally:
             await self.client.logout()
 
@@ -288,10 +380,23 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 controller__name=self.controller_name,
             )
         )
-        for site in await self.client.get_sites():
+        self._collection_channel = "site-discovery"
+        sites = list(await self.client.get_sites())
+        if self.sync_vlans:
+            _included_sites(self.job._unifi_vlan_groups, [site.site_id for site in sites])
+        for site in sites:
             site_id = site.site_id
             site_name = site.name
             self.client.current_site = site_name
+            if self.sync_vlans:
+                self._collection_channel = "vlan-configuration"
+                network_rows, profile_rows = await self.client._get_vlan_configuration()
+                networks = await self._load_vlans(site_id, network_rows)
+                profiles = {}
+                for profile in profile_rows:
+                    if not isinstance(profile.get("_id"), str) or not profile["_id"] or profile["_id"] in profiles:
+                        raise ValueError("Invalid UniFi port-profile configuration channel.")
+                    profiles[profile["_id"]] = profile
             location_type__name = self.default_location_type
             if site_name == "default":
                 site_name = self.default_location_name
@@ -299,6 +404,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             await self._debug("Added site %s", site)
             self.add(site)
 
+            self._collection_channel = "managed-devices"
             for unifi_device in await self.client.get_devices():
                 device_source_id = unifi_device.raw["_id"]
                 device_id = await self._target_id(
@@ -376,6 +482,26 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                         port["port_idx"],
                         target_id,
                     )
+                    if self.sync_vlans:
+                        rows = [
+                            row
+                            for row in unifi_device.raw.get("port_table", [])
+                            if isinstance(row, dict)
+                            and (
+                                (port["port_idx"] is not None and row.get("port_idx") == port["port_idx"])
+                                or (port["port_idx"] is None and row.get("ifname") == port["ifname"])
+                            )
+                        ]
+                        raw_port = rows[0] if len(rows) == 1 else {}
+                        await self._load_membership(
+                            interface,
+                            site_id,
+                            source_id,
+                            raw_port,
+                            profiles,
+                            unifi_device.raw.get("port_overrides", []),
+                            networks,
+                        )
                     if port.get("ip") and port.get("netmask"):
                         await self._assign_ip(port["ip"], port["netmask"], interface)
                     else:

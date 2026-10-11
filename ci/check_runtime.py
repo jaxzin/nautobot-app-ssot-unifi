@@ -27,6 +27,8 @@ suite = unittest.defaultTestLoader.loadTestsFromNames(
         "nautobot_ssot_unifi.tests.test_address_scopes",
         "nautobot_ssot_unifi.tests.test_source_bindings",
         "nautobot_ssot_unifi.tests.test_firmware",
+        "nautobot_ssot_unifi.tests.test_vlan_groups",
+        "nautobot_ssot_unifi.tests.test_vlan_membership",
     ]
 )
 result = unittest.TextTestRunner(verbosity=2).run(suite)

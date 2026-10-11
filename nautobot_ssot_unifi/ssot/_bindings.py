@@ -189,6 +189,7 @@ class _BindingSession:
         self._missing_os = set()
         self.retained_primaries = {}
         self.retained_firmware = {}
+        self.retained_membership = {}
 
     def observe_interfaces(self, site_id, device_id, source_ids):
         """Hold OS-only substitutions when an old OS identity is also omitted."""
