@@ -10,7 +10,7 @@ from diffsync.enum import DiffSyncFlags
 from diffsync.exceptions import ObjectNotUpdated
 from django.db import transaction
 from nautobot.apps.jobs import Job
-from nautobot.dcim.models import Device
+from nautobot.dcim.models import Device, Platform
 from nautobot.ipam.models import IPAddress
 
 from nautobot_ssot.contrib import NautobotAdapter
@@ -21,6 +21,7 @@ from nautobot_ssot_unifi.ssot import models
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
+from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _claim_available, _version
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -50,6 +51,13 @@ class UnifiAdapterMixin:
         "ip_address_to_interface",
     )
 
+    def _configure_firmware(self, job):
+        self.sync_firmware = getattr(job, "sync_firmware", False) is True
+        if self.sync_firmware:
+            self.device = models.FirmwareDeviceModel
+            self.software_version = models.SoftwareVersionModel
+            self.top_level = ("software_version",) + self.top_level
+
 
 class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
     """Adapter to connect to Nautobot."""
@@ -60,12 +68,24 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         """Initialize the adapter."""
         super().__init__(*args, job=job, sync=sync, **kwargs)
         self._primary_ips = []
+        self._configure_firmware(job)
 
     def _load_objects(self, diffsync_model):
         if diffsync_model._modelname in {"device", "interface"}:
             targets = self.job._unifi_bindings.targets(diffsync_model._modelname)
             for obj in diffsync_model._get_queryset().filter(pk__in=targets):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+                retained = self.job._unifi_bindings.retained_primaries.get(obj.pk)
+                if retained is not None and diffsync_model._modelname == "device":
+                    target = self.get("device", str(obj.pk))
+                    for field in models.DeviceModel._attributes:
+                        if field.startswith("primary_ip"):
+                            setattr(retained, field, getattr(target, field))
+                retained = self.job._unifi_bindings.retained_firmware.get(obj.pk)
+                if retained is not None and diffsync_model._modelname == "device":
+                    target = self.get("device", str(obj.pk))
+                    for field in models.FirmwareDeviceModel._attributes[len(models.DeviceModel._attributes) :]:
+                        setattr(retained, field, getattr(target, field))
             return
         if diffsync_model._modelname == "ip_address_to_interface":
             targets = self.job._unifi_bindings.targets("interface")
@@ -132,6 +152,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.debug = kwargs.pop("debug", False)
         super().__init__(*args, **kwargs)
         self.job = job
+        self._configure_firmware(job)
         self.controller_name = controller_name
         self.default_location_type = default_location_type
         self.default_location_name = default_location_name
@@ -153,7 +174,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
 
     @sync_to_async
     def _retain_primaries(self, device):
-        """Project last-good values when the source provides no management evidence."""
+        """Mark unavailable evidence as non-authoritative, never a primary write."""
+        self.job._unifi_bindings.retained_primaries[device.id] = device
         native = (
             Device.objects.filter(pk=device.id)
             .select_related("primary_ip4__parent__namespace", "primary_ip6__parent__namespace")
@@ -165,6 +187,31 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             address = getattr(native, family)
             setattr(device, f"{family}__host", address.host if address else None)
             setattr(device, f"{family}__parent__namespace__name", address.parent.namespace.name if address else None)
+
+    @sync_to_async
+    def _load_firmware(self, device, site_id, source_id, reported_version):
+        """Project shared version dependency and the exact Device field claim."""
+        document = dict(self.job._unifi_bindings.documents[("device", device.id)])
+        native = Device.objects.filter(pk=device.id).select_related("software_version__platform").first()
+        if native is not None and native.software_version is not None:
+            device.software_version__platform__name = native.software_version.platform.name
+            device.software_version__version = native.software_version.version
+        device.unifi_ownership = document
+        try:
+            version = _version(reported_version)
+            if not Platform.objects.filter(name=device.platform__name).exists():
+                raise _FirmwareHold("missing-platform")
+            _claim_available(device.id, self.job._unifi_bindings.integration_id)
+        except _FirmwareHold as error:
+            self._held.append({"kind": "firmware", "site_id": site_id, "source_id": source_id, "reason": error.reason})
+            self.job._unifi_bindings.retained_firmware[device.id] = device
+            return
+        self.get_or_add_model_instance(self.software_version(platform__name=device.platform__name, version=version))
+        device.software_version__platform__name = device.platform__name
+        device.software_version__version = version
+        document["field_paths"] = sorted(set(document["field_paths"]) | {"software_version"})
+        self.job._unifi_bindings.documents[("device", device.id)] = document
+        device.unifi_ownership = document
 
     @sync_to_async
     def _debug(self, *args, **kwargs):
@@ -290,6 +337,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     platform__name=UNIFI_MAP[unifi_type]["platform"],
                 )
                 await self._debug("Adding device %s", device)
+                if self.sync_firmware:
+                    await self._load_firmware(device, site_id, device_source_id, unifi_device.raw.get("version"))
                 self.add(device)
                 interfaces = _interface_records(unifi_device.raw)
                 self.job._unifi_bindings.observe_interfaces(

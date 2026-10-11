@@ -427,3 +427,69 @@ class NativeBindingTests(TestCase):
             self.device.refresh_from_db()
             self.assertEqual(self.device.primary_ip4_id, before)
             self.assertEqual(self.device.name, "independent-rename")
+
+    def test_unavailable_management_evidence_cannot_overwrite_newer_primary(self):
+        from aiounifi.models.device import Device as UnifiDevice
+        from aiounifi.models.site import Site
+        from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
+        from nautobot_ssot_unifi.unifi.client import Client
+        from nautobot.ipam.models import IPAddressToInterface
+        from types import SimpleNamespace
+        import logging
+
+        self.bind(self.device, "device-a")
+        self.device.primary_ip4 = None
+        self.device.validated_save()
+        self.job.controller = SimpleNamespace(name="contract-controller", external_integration=self.integration)
+        self.job.hardware_models = {}
+        self.job.logger = logging.getLogger(__name__)
+
+        async def sites(_client):
+            return [Site({"_id": "site-a", "name": "default"})]
+
+        async def devices(_client):
+            return [
+                UnifiDevice(
+                    {
+                        "_id": "device-a",
+                        "name": "contract-device",
+                        "model": "TEST",
+                        "type": "uap",
+                        "serial": "",
+                        "config_network": None,
+                    }
+                )
+            ]
+
+        source = UnifiAdapter(
+            job=self.job,
+            controller_name="contract-controller",
+            default_location_type="contract-site",
+            default_location_name="contract-site",
+        )
+        with patch.object(Client, "get_sites", sites), patch.object(Client, "get_devices", devices):
+            source.load(
+                host="controller.invalid",
+                port=443,
+                username="test-reader",
+                password="test-only",
+                verify_cert=True,
+                timeout=1,
+            )
+        desired = source.get_all("device")[0]
+        desired.device_type__model = self.device.device_type.model
+        desired.role__name = self.device.role.name
+        desired.platform__name = self.device.platform.name
+        desired.name = "independent-rename"
+        source.top_level = ("device",)
+        newer = self.address(self.a, "198.51.100.0/24", "198.51.100.1/24")
+        IPAddressToInterface.objects.create(interface=self.interface, ip_address=newer)
+        self.device.primary_ip4 = newer
+        self.device.validated_save()
+        target = UnifiNautobotAdapter(job=self.job)
+        target.top_level = ("device",)
+        target.load()
+        source.sync_to(target, flags=DiffSyncFlags.SKIP_UNMATCHED_DST)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4_id, newer.pk)
+        self.assertEqual(self.device.name, "independent-rename")

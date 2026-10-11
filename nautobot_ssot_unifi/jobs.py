@@ -63,6 +63,17 @@ class UnifiDataSource(DataSource, Job):
         "Null uses Namespace; an empty list admits no IPs. Rules have no fallback.",
         required=False,
     )
+    sync_firmware = BooleanVar(
+        description="Import reported firmware using native SoftwareVersion records.", default=False
+    )
+    sync_vlans = BooleanVar(description="Import site-scoped VLANs and effective interface membership.", default=False)
+    sync_neighbors = BooleanVar(
+        description="Import last-known interface neighbor observations, not physical cables.", default=False
+    )
+    vlan_groups = JSONVar(
+        description="Optional entries with site_id and existing vlan_group_id UUID; one group per source site.",
+        required=False,
+    )
 
     class Meta:  # pylint: disable=too-few-public-methods
         """Meta data for Unifi."""
@@ -153,12 +164,22 @@ class UnifiDataSource(DataSource, Job):
         *args,
         namespace=None,
         address_scopes=None,
+        sync_firmware=False,
+        sync_vlans=False,
+        sync_neighbors=False,
+        vlan_groups=None,
         **kwargs,
     ):  # pylint: disable=arguments-differ,too-many-arguments,attribute-defined-outside-init
         """Perform data synchronization."""
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
+        if any(type(flag) is not bool for flag in (sync_firmware, sync_vlans, sync_neighbors)):
+            raise ValueError("UniFi inventory opt-ins must be booleans.")
+        self.sync_firmware = sync_firmware
+        self.sync_vlans = sync_vlans
+        self.sync_neighbors = sync_neighbors
+        self.vlan_groups = vlan_groups
         self.namespace = namespace if namespace is not None else Namespace.objects.get(name="Global")
         self.address_scope_resolver = AddressScopeResolver(address_scopes, self.namespace.name)
         self.default_location = default_location or controller.location

@@ -187,6 +187,8 @@ class _BindingSession:
         self._collisions = {}
         self._seen = set()
         self._missing_os = set()
+        self.retained_primaries = {}
+        self.retained_firmware = {}
 
     def observe_interfaces(self, site_id, device_id, source_ids):
         """Hold OS-only substitutions when an old OS identity is also omitted."""
@@ -307,11 +309,17 @@ class _BindingSession:
             raise _BindingHold("identity-conflict")
         result = create()
         obj = self._model(kind).objects.get(pk=target)
-        metadata = ObjectMetadata(
-            metadata_type=MetadataType.objects.get(name=_OWNERSHIP_TYPE), assigned_object=obj, scoped_fields=[]
-        )
-        metadata.value = document
-        metadata.validated_save()
+        metadata_type = MetadataType.objects.get(name=_OWNERSHIP_TYPE)
+        metadata = obj.associated_object_metadata.filter(metadata_type=metadata_type).first()
+        if metadata is not None:
+            # Native SSoT ObjectMetadataAnnotation may have created the binding
+            # in the same native-object transaction. Never create an overlap.
+            if metadata.scoped_fields != [] or metadata.value != document:
+                raise _BindingHold("identity-conflict")
+        else:
+            metadata = ObjectMetadata(metadata_type=metadata_type, assigned_object=obj, scoped_fields=[])
+            metadata.value = document
+            metadata.validated_save()
         return result
 
     def lock(self):

@@ -1,19 +1,20 @@
 """Nautobot DiffSync models for Unifi SSoT."""
 
-from typing import TYPE_CHECKING, Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional, Any
 import uuid
 
 from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated, ObjectNotDeleted
 from django.db import transaction
-from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation
+from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation, ObjectMetadataAnnotation
 
 from nautobot.extras.models import Tag, Status
-from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface
+from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface, SoftwareVersion
 from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface
 from nautobot.ipam.choices import PrefixTypeChoices
 
 from nautobot_ssot_unifi.const import UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
-from nautobot_ssot_unifi.ssot._bindings import _BindingHold
+from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _OWNERSHIP_TYPE
+from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _claim_available
 
 if TYPE_CHECKING:
     from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
@@ -121,6 +122,7 @@ class _BoundModelMixin:
                 session.lock()
                 if cls._modelname == "interface":
                     session.check_parent(ids["id"], attrs["device__id"])
+                cls._guard_extension_fields(adapter, ids["id"], attrs)
                 result = session.admit(
                     cls._modelname, ids["id"], lambda: super(_BoundModelMixin, cls).create(adapter, ids, attrs)
                 )
@@ -128,7 +130,7 @@ class _BoundModelMixin:
                 obj.tags.add(Tag.objects.get(name=UNIFI_SSOT_TAG))
                 result.pk = obj.pk
                 return result
-        except _BindingHold as error:
+        except (_BindingHold, _FirmwareHold) as error:
             raise ObjectNotCreated(error.reason) from None
 
     def update(self, attrs):
@@ -142,9 +144,19 @@ class _BoundModelMixin:
                 self.adapter.cache.invalidate_cache()
                 if self._modelname == "interface":
                     session.check_native_parent(self.id, attrs.get("device__id", self.device__id))
+                self._guard_extension_fields(self.adapter, self.id, attrs)
                 return super().update(attrs)
-        except _BindingHold as error:
+        except (_BindingHold, _FirmwareHold) as error:
             raise ObjectNotUpdated(error.reason) from None
+
+    @classmethod
+    def _guard_extension_fields(cls, adapter, target_id, attrs):
+        ownership = attrs.get("unifi_ownership") or {}
+        if cls._modelname == "device" and (
+            any(key.startswith("software_version__") for key in attrs)
+            or "software_version" in ownership.get("field_paths", [])
+        ):
+            _claim_available(target_id, adapter.job._unifi_bindings.integration_id, lock=True)
 
     def delete(self):
         """This inventory increment never deletes a Device or Interface."""
@@ -227,7 +239,8 @@ class DeviceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
         return primary_attrs
 
     def _defer_primary_attrs(self, adapter, attrs):
-        if not attrs:
+        session = getattr(adapter.job, "_unifi_bindings", None)
+        if not attrs or (session is not None and self.id in session.retained_primaries):
             return
         info = {"device": self.get_identifiers()}
         for family in ("primary_ip4", "primary_ip6"):
@@ -253,6 +266,54 @@ class DeviceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
         if result is not None:
             self._defer_primary_attrs(self.adapter, primary_attrs)
         return result
+
+
+class SoftwareVersionModel(ActiveStatusMixin, NautobotModel):
+    """Shared native catalog identity; existing curated fields are never updated."""
+
+    _model = SoftwareVersion
+    _modelname = "software_version"
+    _identifiers = ("platform__name", "version")
+    _attributes = ()
+    platform__name: str
+    version: str
+    status_id: Optional[uuid.UUID] = None
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Reuse shared versions unchanged; create only an absent exact identity."""
+        existing = cls._model.objects.filter(**ids).first()
+        if existing is not None:
+            return cls(adapter=adapter, pk=existing.pk, **ids)
+        result = super().create(adapter, ids, attrs)
+        result.pk = cls._model.objects.get(**ids).pk
+        return result
+
+
+class FirmwareDeviceModel(DeviceModel):
+    """Opt-in firmware lookup and native metadata projection."""
+
+    _attributes = DeviceModel._attributes + (
+        "software_version__platform__name",
+        "software_version__version",
+        "unifi_ownership",
+    )
+    software_version__platform__name: Optional[str] = None
+    software_version__version: Optional[str] = None
+    unifi_ownership: Annotated[
+        Optional[dict[str, Any]], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
+    ] = None
+
+    def update(self, attrs):
+        """Supply both components of a changed platform-scoped version lookup."""
+        attrs = dict(attrs)
+        if self.id in self.adapter.job._unifi_bindings.retained_firmware:
+            for field in self._attributes[len(DeviceModel._attributes) :]:
+                attrs.pop(field, None)
+        if any(key.startswith("software_version__") for key in attrs):
+            for field in ("software_version__platform__name", "software_version__version"):
+                attrs.setdefault(field, getattr(self, field))
+        return super().update(attrs)
 
 
 class DeviceGroupModel(UnifiModelMixin, NautobotModel):
