@@ -24,3 +24,41 @@ jobs:
           uv pip check
       - name: Validate persistent interfaces and existing source boundaries
         run: uv run --no-project --python .venv/bin/python python ci/check_runtime.py
+
+  native:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: unifi_namespace_check
+          POSTGRES_USER: nautobot
+          POSTGRES_PASSWORD: disposable-test-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nautobot -d unifi_namespace_check"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NAUTOBOT_CONFIG: ${{ github.workspace }}/development/native_compatibility_config.py
+      NAUTOBOT_ROOT: ${{ github.workspace }}/.runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.3"
+          python-version: "3.12"
+      - name: Install supported runtime
+        run: |
+          uv venv
+          uv pip install . nautobot==3.2.4 nautobot-ssot==4.6.1
+          uv pip check
+      - name: Prepare disposable native schema
+        run: uv run --no-project --python .venv/bin/python nautobot-server migrate --noinput
+      - name: Validate native ownership, identity, and namespace behavior
+        run: uv run --no-project --python .venv/bin/python python ci/check_native.py test

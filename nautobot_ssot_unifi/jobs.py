@@ -19,6 +19,8 @@ from nautobot_ssot.jobs.base import DataSource
 
 from nautobot_ssot_unifi.ssot import adapters
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
+from nautobot_ssot_unifi.ssot._vlans import _group_bindings
+from nautobot_ssot_unifi.ssot._held import _publish_held
 
 name = "Unifi SSoT"  # pylint: disable=invalid-name
 
@@ -61,6 +63,17 @@ class UnifiDataSource(DataSource, Job):
     address_scopes = _AddressScopesVar(
         description="Optional address rules: each has prefixes (canonical CIDRs) and namespace_id (existing UUID). "
         "Null uses Namespace; an empty list admits no IPs. Rules have no fallback.",
+        required=False,
+    )
+    sync_firmware = BooleanVar(
+        description="Import reported firmware using native SoftwareVersion records.", default=False
+    )
+    sync_vlans = BooleanVar(description="Import site-scoped VLANs and effective interface membership.", default=False)
+    sync_neighbors = BooleanVar(
+        description="Import last-known interface neighbor observations, not physical cables.", default=False
+    )
+    vlan_groups = JSONVar(
+        description="Optional entries with site_id and existing vlan_group_id UUID; one group per source site.",
         required=False,
     )
 
@@ -131,11 +144,18 @@ class UnifiDataSource(DataSource, Job):
             verify_cert=external_integration.verify_ssl,
             timeout=external_integration.timeout,
         )
+        self._unifi_collection_complete = True
 
     def load_target_adapter(self):
         """Load data from Nautobot into DiffSync models."""
         self.target_adapter = adapters.UnifiNautobotAdapter(job=self, sync=self.sync)
         self.target_adapter.load()
+
+    def execute_sync(self):
+        """Keep roll-forward work and derive Job failure from native SSoT history."""
+        super().execute_sync()
+        if self.sync.logs.filter(status__in=["failure", "error"]).exists():
+            self.fail("UniFi inventory sync has failed native writes; completed independent updates are retained.")
 
     def run(
         self,
@@ -147,12 +167,29 @@ class UnifiDataSource(DataSource, Job):
         *args,
         namespace=None,
         address_scopes=None,
+        sync_firmware=False,
+        sync_vlans=False,
+        sync_neighbors=False,
+        vlan_groups=None,
         **kwargs,
     ):  # pylint: disable=arguments-differ,too-many-arguments,attribute-defined-outside-init
         """Perform data synchronization."""
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
+        self._unifi_collection_complete = False
+        for name, flag in (
+            ("sync_firmware", sync_firmware),
+            ("sync_vlans", sync_vlans),
+            ("sync_neighbors", sync_neighbors),
+        ):
+            if type(flag) is not bool:
+                raise ValidationError({name: "Must be a boolean."})
+        self.sync_firmware = sync_firmware
+        self.sync_vlans = sync_vlans
+        self.sync_neighbors = sync_neighbors
+        self.vlan_groups = vlan_groups
+        self._unifi_vlan_groups = _group_bindings(vlan_groups) if sync_vlans else {}
         self.namespace = namespace if namespace is not None else Namespace.objects.get(name="Global")
         self.address_scope_resolver = AddressScopeResolver(address_scopes, self.namespace.name)
         self.default_location = default_location or controller.location
@@ -167,7 +204,11 @@ class UnifiDataSource(DataSource, Job):
             for record in reader:
                 self.hardware_models[record["model"]] = record
 
-        super().run(dryrun=self.dryrun, *args, **kwargs)
+        try:
+            super().run(dryrun=self.dryrun, *args, **kwargs)
+        finally:
+            if getattr(self, "source_adapter", None) is not None:
+                _publish_held(self)
 
 
 register_jobs(UnifiDataSource)

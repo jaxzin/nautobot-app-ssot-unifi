@@ -7,14 +7,19 @@ from unittest.mock import patch
 
 from aiounifi.models.device import Device
 from aiounifi.models.site import Site
+from django.db.models import QuerySet
 
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 from nautobot_ssot_unifi.unifi.client import Client
+from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
+
+INTEGRATION = "00000000-0000-0000-0000-000000000001"
 
 
 class PersistentInterfaceTests(TestCase):
     def load(self, namespace=None, address_scope_resolver=None, **tables):
         raw = {
+            "_id": "device-a",
             "name": "test-device",
             "model": "TEST",
             "type": "uap",
@@ -24,7 +29,7 @@ class PersistentInterfaceTests(TestCase):
         }
         adapter = UnifiAdapter(
             job=SimpleNamespace(
-                controller=SimpleNamespace(name="Controller"),
+                controller=SimpleNamespace(name="Controller", external_integration=SimpleNamespace(pk=INTEGRATION)),
                 hardware_models={},
                 logger=logging.getLogger(__name__),
                 namespace=SimpleNamespace(name=namespace) if namespace else None,
@@ -37,12 +42,17 @@ class PersistentInterfaceTests(TestCase):
         )
 
         async def sites(_client):
-            return [Site({"name": "default"})]
+            return [Site({"name": "default", "_id": "site-a"})]
 
         async def devices(_client):
             return [Device(raw)]
 
-        with patch.object(Client, "get_sites", sites), patch.object(Client, "get_devices", devices):
+        with (
+            patch.object(Client, "get_sites", sites),
+            patch.object(Client, "get_devices", devices),
+            patch.object(_BindingIndex, "from_orm", return_value=_BindingIndex([])),
+            patch.object(QuerySet, "exists", return_value=False),
+        ):
             adapter.load(
                 host="controller.example",
                 port=443,
@@ -163,7 +173,7 @@ class PersistentInterfaceTests(TestCase):
                     )
 
     def test_reported_mgmt_does_not_implicitly_adopt_synthetic_management_address(self):
-        with self.assertRaisesRegex(ValueError, "management interface"):
+        with self.assertRaisesRegex(ValueError, "^UniFi managed-devices collection failed\\.$"):
             self.load(
                 ethernet_table=[{"name": "mgmt"}],
                 config_network={"type": "static", "ip": "192.0.2.1", "netmask": "255.255.255.0"},

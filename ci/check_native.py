@@ -24,7 +24,14 @@ if database["NAME"] != "unifi_namespace_check" or database["HOST"] not in ("127.
 # Use the already migrated disposable database. Django TestCase rolls every
 # fixture back; no database creation, migration, flush, or production endpoint.
 suite = unittest.defaultTestLoader.loadTestsFromNames(
-    sys.argv[2:] or ["nautobot_ssot_unifi.tests.test_native_namespaces"]
+    sys.argv[2:]
+    or [
+        "nautobot_ssot_unifi.tests.test_native_namespaces",
+        "nautobot_ssot_unifi.tests.test_native_source_bindings",
+        "nautobot_ssot_unifi.tests.test_native_firmware",
+        "nautobot_ssot_unifi.tests.test_native_vlans",
+        "nautobot_ssot_unifi.tests.test_native_neighbors",
+    ]
 )
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 raise SystemExit(not result.wasSuccessful())

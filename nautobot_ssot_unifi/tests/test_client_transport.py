@@ -8,6 +8,23 @@ from nautobot_ssot_unifi.unifi.client import Client
 
 
 class ClientTransportTests(IsolatedAsyncioTestCase):
+    async def test_vlan_channel_is_get_only_and_discards_credentials(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        requests = []
+
+        async def response(request):
+            requests.append((request.method, request.path, request.data))
+            return {"data": [{"_id": "safe-id", "name": "LAN", "vlan": 10, "x_secret": "synthetic-secret"}]}
+
+        try:
+            with patch.object(client.api, "request", response):
+                networks, profiles = await client._get_vlan_configuration()
+            self.assertEqual(requests, [("get", "/rest/networkconf", None), ("get", "/rest/portconf", None)])
+            self.assertNotIn("synthetic-secret", repr((networks, profiles)))
+        finally:
+            await client.logout()
+
     async def test_verification_is_enforced_by_aiounifi(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         try:
@@ -38,5 +55,26 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
                 second = list(await client.get_devices())
             self.assertEqual([device.mac for device in first], ["00:00:00:00:00:01"])
             self.assertEqual([device.mac for device in second], ["00:00:00:00:00:02"])
+        finally:
+            await client.logout()
+
+    async def test_login_does_not_collect_household_clients(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        requests = []
+
+        async def login():
+            return None
+
+        async def response(request):
+            requests.append(request)
+            if len(requests) != 1 or request.path != "/stat/device":
+                raise AssertionError("Unexpected source collection channel.")
+            return {"data": []}
+
+        try:
+            with patch.object(client.api, "login", login), patch.object(client.api, "request", response):
+                self.assertEqual(list(await client.get_devices()), [])
+                self.assertTrue(client.logged_in)
+                self.assertEqual(len(requests), 1)
         finally:
             await client.logout()

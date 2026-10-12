@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from aiounifi.models.site import Site
 from aiounifi.models.device import Device
+from django.db.models import QuerySet
+from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
 
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 from nautobot_ssot_unifi.unifi.client import Client
@@ -18,7 +20,12 @@ from nautobot_ssot_unifi.unifi.client import Client
 class SourceLifecycleTests(TestCase):
     def setUp(self):
         self.adapter = UnifiAdapter(
-            job=SimpleNamespace(controller=SimpleNamespace(name="Controller"), logger=logging.getLogger(__name__)),
+            job=SimpleNamespace(
+                controller=SimpleNamespace(
+                    name="Controller", external_integration=SimpleNamespace(pk="00000000-0000-0000-0000-000000000001")
+                ),
+                logger=logging.getLogger(__name__),
+            ),
             controller_name="Controller",
             default_location_type="Site",
             default_location_name="Home",
@@ -29,15 +36,23 @@ class SourceLifecycleTests(TestCase):
             asyncio.run(self.adapter.client.logout())
 
     def load(self):
-        self.adapter.load(
-            host="controller.example", port=443, username="reader", password="test-only", verify_cert=True, timeout=1
-        )
+        with patch.object(_BindingIndex, "from_orm", return_value=_BindingIndex([])), patch.object(
+            QuerySet, "exists", return_value=False
+        ):
+            self.adapter.load(
+                host="controller.example",
+                port=443,
+                username="reader",
+                password="test-only",
+                verify_cert=True,
+                timeout=1,
+            )
 
     def test_each_site_selects_its_own_device_endpoint(self):
         selected_sites = []
 
         async def sites(_client):
-            return [Site({"name": "default"}), Site({"name": "workshop"})]
+            return [Site({"name": "default", "_id": "site-a"}), Site({"name": "workshop", "_id": "site-b"})]
 
         async def devices(client):
             selected_sites.append(client.current_site)
@@ -55,11 +70,12 @@ class SourceLifecycleTests(TestCase):
 
     def test_connection_is_closed_when_source_read_fails(self):
         async def sites(_client):
-            raise RuntimeError("source unavailable")
+            raise RuntimeError("source unavailable: synthetic-secret and response body")
 
         with patch.object(Client, "get_sites", sites):
-            with self.assertRaisesRegex(RuntimeError, "source unavailable"):
+            with self.assertRaisesRegex(ValueError, "^UniFi site-discovery collection failed\\.$") as caught:
                 self.load()
+            self.assertNotIn("synthetic-secret", str(caught.exception))
 
         self.assertTrue(self.adapter.client.session.closed)
 
@@ -85,12 +101,13 @@ class SourceLifecycleTests(TestCase):
             self.adapter.job.hardware_models = {row["model"]: row for row in csv.DictReader(records)}
 
         async def sites(_client):
-            return [Site({"name": "default"})]
+            return [Site({"name": "default", "_id": "site-a"})]
 
         async def devices(_client):
             records = []
             for index, (model, category) in enumerate(observed):
                 raw = {
+                    "_id": f"source-device-{index}",
                     "model": model,
                     "type": category,
                     "name": f"device-{index}",

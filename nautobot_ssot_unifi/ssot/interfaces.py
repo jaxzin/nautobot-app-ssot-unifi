@@ -48,6 +48,7 @@ def _interface_records(raw):
         record = {
             "name": row["name"],
             "port_idx": _port_id(row),
+            "ifname": row.get("ifname") if origin == "port" else row["name"],
             "type": _media_type(row, default),
             "ip": row.get("ip"),
             "netmask": row.get("netmask"),
