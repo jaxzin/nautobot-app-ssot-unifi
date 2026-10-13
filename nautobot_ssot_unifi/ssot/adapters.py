@@ -25,7 +25,7 @@ from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
-from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership, _VlanHold
+from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership, _VlanHold, _wan_without_vlan
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
 
 from nautobot_ssot_unifi.unifi import Client
@@ -254,9 +254,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self._held.extend(
             {"kind": "vlan", "site_id": site_id, "source_id": source_id, "reason": reason} for source_id, reason in held
         )
-        # Keep the complete source universe, including networks held during
-        # native resolution. None means unresolved, never absent from a policy.
-        networks = {row["_id"]: None for row in raw_networks}
+        # WAN configurations without a VLAN are not switch-tagging candidates.
+        # Keep untagged/held LAN networks unresolved: no native VID was reported.
+        networks = {row["_id"]: None for row in raw_networks if not _wan_without_vlan(row)}
         for row in rows:
             try:
                 target_id = self.job._unifi_bindings.plan(
