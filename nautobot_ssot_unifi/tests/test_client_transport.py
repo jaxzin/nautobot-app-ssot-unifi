@@ -25,6 +25,20 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         finally:
             await client.logout()
 
+    async def test_network_purpose_survives_the_credential_safe_projection(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+
+        async def response(request):
+            return {"data": [{"_id": "wan", "name": "Internet", "purpose": "wan", "x_secret": "test-only"}]}
+
+        try:
+            with patch.object(client.api, "request", response):
+                networks, _profiles = await client._get_vlan_configuration()
+            self.assertEqual(networks, [{"_id": "wan", "name": "Internet", "purpose": "wan"}])
+        finally:
+            await client.logout()
+
     async def test_verification_is_enforced_by_aiounifi(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         try:

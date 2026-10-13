@@ -94,6 +94,32 @@ class NativeVlanTests(TestCase):
         self.sync(self.source([], {}))
         self.assertTrue(VLAN.objects.filter(pk=original).exists())
 
+    def test_wan_config_does_not_poison_complete_tagged_membership(self):
+        rows = [
+            {"_id": "net-a", "name": "A", "vlan": 10},
+            {"_id": "net-b", "name": "B", "vlan": 20},
+            {"_id": "wan", "name": "Internet", "purpose": "wan"},
+        ]
+        port = {"native_networkconf_id": "net-a", "tagged_vlan_mgmt": "custom", "excluded_networkconf_ids": []}
+        source = self.source(rows, port)
+        self.assertFalse(source._held)
+        self.sync(source)
+        self.assertEqual(self.interface.mode, "tagged")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+        self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
+        self.assertEqual(VLAN.objects.count(), 2)
+
+    def test_explicit_untagged_network_does_not_invent_native_vlan(self):
+        rows = [{"_id": "native", "name": "Untagged", "purpose": "corporate", "vlan_enabled": False}]
+        source = self.source(rows, {"native_networkconf_id": "native", "forward": "all"})
+        self.assertEqual(
+            [(r["kind"], r["reason"]) for r in source._held], [("vlan-membership", "incomplete-membership")]
+        )
+        self.sync(source)
+        self.assertFalse(VLAN.objects.exists())
+        self.assertEqual(self.interface.mode, "")
+        self.assertIsNone(self.interface.untagged_vlan_id)
+
     def test_foreign_native_vlan_key_is_held_not_adopted(self):
         foreign = VLAN.objects.create(name="Curated", vid=10, vlan_group=self.group, status=self.status)
         source = self.source([{"_id": "net-a", "name": "A", "vlan": 10}], {})

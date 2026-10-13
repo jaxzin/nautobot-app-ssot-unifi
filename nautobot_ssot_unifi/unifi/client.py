@@ -108,7 +108,7 @@ class Client:
         """GET only; discard unrelated/credential-bearing configuration fields."""
         projections = []
         for path, fields in (
-            ("/rest/networkconf", {"_id", "name", "vlan", "vlan_enabled"}),
+            ("/rest/networkconf", {"_id", "name", "purpose", "vlan", "vlan_enabled"}),
             (
                 "/rest/portconf",
                 {

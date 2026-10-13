@@ -75,3 +75,51 @@ class MembershipTests(TestCase):
         self.assertEqual(rows, [])
         self.assertEqual({reason for _, reason in held}, {"invalid-vlan", "duplicate-vlan"})
         self.assertEqual(_networks([{"_id": "a", "name": "LAN", "vlan": 10}])[0][0]["vid"], 10)
+
+    def test_non_vlan_networks_do_not_generate_invalid_vlan_holds(self):
+        rows, held = _networks(
+            [
+                {"_id": "wan", "name": "Internet", "purpose": "wan"},
+                {"_id": "wan2", "name": "Backup", "purpose": "wan2"},
+                {"_id": "native", "name": "Untagged", "purpose": "corporate", "vlan_enabled": False},
+                {"_id": "tagged", "name": "Tagged", "purpose": "corporate", "vlan_enabled": True, "vlan": 20},
+            ]
+        )
+        self.assertEqual(rows, [{"source_id": "tagged", "vid": 20, "name": "Tagged"}])
+        self.assertEqual(held, [])
+
+    def test_non_vlan_names_do_not_poison_tagged_vlan_uniqueness(self):
+        rows, held = _networks(
+            [
+                {"_id": "wan", "name": "Shared", "purpose": "wan"},
+                {"_id": "native", "name": "Shared", "vlan_enabled": False},
+                {"_id": "tagged", "name": "Shared", "vlan": 20},
+            ]
+        )
+        self.assertEqual(rows, [{"source_id": "tagged", "vid": 20, "name": "Shared"}])
+        self.assertEqual(held, [])
+
+    def test_missing_or_malformed_vlan_evidence_still_held(self):
+        rows, held = _networks(
+            [
+                {"_id": "unknown", "name": "Unknown", "purpose": "corporate"},
+                {"_id": "disabled-with-tag", "name": "Conflict", "vlan_enabled": False, "vlan": 20},
+                {"_id": "invalid", "name": "Invalid", "purpose": "wan", "vlan": "not-a-vid"},
+            ]
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            held, [("unknown", "invalid-vlan"), ("disabled-with-tag", "invalid-vlan"), ("invalid", "invalid-vlan")]
+        )
+
+    def test_malformed_purpose_does_not_break_vlan_classification(self):
+        self.assertEqual(
+            _networks([{"_id": "a", "name": "A", "vlan": 20, "purpose": {}}]),
+            ([{"source_id": "a", "vid": 20, "name": "A"}], []),
+        )
+
+    def test_malformed_name_is_held_without_breaking_other_vlans(self):
+        self.assertEqual(
+            _networks([{"_id": "a", "name": [], "vlan": 10}, {"_id": "b", "name": "B", "vlan": 20}]),
+            ([{"source_id": "b", "vid": 20, "name": "B"}], [("a", "invalid-vlan")]),
+        )

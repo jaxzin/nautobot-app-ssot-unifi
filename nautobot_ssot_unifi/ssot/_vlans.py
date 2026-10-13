@@ -43,18 +43,31 @@ def _included_sites(bindings, sites):
         raise ValidationError({"vlan_groups": "Bindings must match every included source site exactly."})
 
 
+def _wan_without_vlan(row):
+    return row.get("purpose") in ("wan", "wan2") and row.get("vlan") is None
+
+
+def _non_vlan_network(row):
+    return _wan_without_vlan(row) or (row.get("vlan_enabled") is False and row.get("vlan") is None)
+
+
 def _networks(networks):
     if not isinstance(networks, list) or any(
         not isinstance(row, dict) or not _text(row.get("_id")) for row in networks
     ):
         raise ValueError("Invalid UniFi network configuration channel.")
     ids = Counter(row["_id"] for row in networks)
-    names = Counter(row.get("name") for row in networks if isinstance(row.get("name"), str))
-    vids = Counter(row.get("vlan") for row in networks if type(row.get("vlan")) is int)
+    candidates = [row for row in networks if not _non_vlan_network(row)]
+    names = Counter(row.get("name") for row in candidates if isinstance(row.get("name"), str))
+    vids = Counter(row.get("vlan") for row in candidates if type(row.get("vlan")) is int)
     rows, held = [], []
-    for row in networks:
+    for row in candidates:
         vid = row.get("vlan")
-        if ids[row["_id"]] > 1 or names[row.get("name")] > 1 or (type(vid) is int and vids[vid] > 1):
+        if (
+            ids[row["_id"]] > 1
+            or (isinstance(row.get("name"), str) and names[row["name"]] > 1)
+            or (type(vid) is int and vids[vid] > 1)
+        ):
             held.append((row["_id"], "duplicate-vlan"))
         elif (
             type(vid) is not int
