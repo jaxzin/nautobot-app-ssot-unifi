@@ -94,6 +94,35 @@ class NativeVlanTests(TestCase):
         self.sync(self.source([], {}))
         self.assertTrue(VLAN.objects.filter(pk=original).exists())
 
+    def test_agreeing_allow_all_applies_then_omission_retains_and_explicit_removal_clears(self):
+        rows = [{"_id": "net-a", "name": "A", "vlan": 10}, {"_id": "net-b", "name": "B", "vlan": 20}]
+        port = {"native_networkconf_id": "net-a", "forward": "all", "tagged_vlan_mgmt": "auto"}
+        original_id = self.interface.pk
+        source = self.source(rows, port)
+        self.assertFalse(source._held)
+        self.sync(source)
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "tagged-all")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+        self.assertFalse(self.interface.tagged_vlans.exists())
+        claim = ObjectMetadata.objects.get(
+            assigned_object_id=original_id, metadata_type__name="UniFi inventory ownership"
+        )
+        self.assertEqual(set(claim.value["field_paths"]), {"mode", "untagged_vlan", "tagged_vlans"})
+
+        omitted = self.source(rows, {"forward": "all", "tagged_vlan_mgmt": "auto"})
+        self.assertTrue(any(row["reason"] == "incomplete-membership" for row in omitted._held))
+        self.sync(omitted)
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "tagged-all")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+
+        self.sync(self.source(rows, {"native_networkconf_id": "", "tagged_vlan_mgmt": "block_all"}))
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "access")
+        self.assertIsNone(self.interface.untagged_vlan_id)
+        self.assertFalse(self.interface.tagged_vlans.exists())
+
     def test_wan_config_does_not_poison_complete_tagged_membership(self):
         rows = [
             {"_id": "net-a", "name": "A", "vlan": 10},

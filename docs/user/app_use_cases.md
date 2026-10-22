@@ -7,7 +7,9 @@ applies to Nautobot 3.2.4 with SSoT 4.6.1. UniFi remains read-only.
 ## Prepare the inventory
 
 Provision prerequisites through your deployment automation before running the
-Job. The connector does not create MetadataTypes, Relationships, or VLANGroups.
+Job. The connector does not create the extension MetadataTypes, Relationships,
+or VLANGroups listed below. SSoT manages its optional synchronization datetime
+MetadataType separately.
 
 | Prerequisite | Native definition |
 | --- | --- |
@@ -80,6 +82,37 @@ sites fail after read-only site discovery and before inventory writes.
 Disabled features are omitted from comparison. Turning a feature off does not
 clear its previously imported fields.
 
+## Track synchronization timestamps
+
+Use SSoT's standard Object Metadata support to track synchronization datetime.
+In the deployment-managed `PLUGINS_CONFIG`, include `UnifiDataSource` in
+`nautobot_ssot.enable_metadata_for`. Preserve other enabled Job names and SSoT
+settings. This configuration fragment shows the relevant setting:
+
+```python
+{
+    "nautobot_ssot": {
+        "enable_metadata_for": ["UnifiDataSource"],
+    },
+}
+```
+
+SSoT creates the datetime MetadataType **Last sync from Unifi**, using the Job's
+data source name. Standard model create/update operations write the timestamp
+and scope it to the model's synchronized fields. Browse an imported object's
+**Metadata** tab to view it.
+
+This timestamp records synchronization, not independent verification of every
+scoped field. An unchanged object does not refresh it. An update to another
+field can refresh the object-model timestamp while incomplete VLAN membership
+is retained. Do not interpret it as proof that VLAN membership was verified.
+No separate last-verified metadata is maintained.
+
+Use the object's native change history to inspect inventory changes and SSoT
+history to inspect synchronization outcomes. See [SSoT Object Metadata
+support](https://docs.nautobot.com/projects/ssot/en/latest/user/app_use_cases/#object-metadata-support)
+for the framework contract.
+
 ## Understand imported facts
 
 Firmware uses the reported version after trimming surrounding whitespace and
@@ -93,6 +126,13 @@ VLAN 1 when a source identifier is missing. Complete profiles and overrides map
 to native access, tagged, or tagged-all mode. Explicit complete removal can
 clear owned membership; missing profiles or fields cannot. Source omission
 does not delete VLANs or move IPAM records between namespaces.
+
+An explicit `forward=all` together with `tagged_vlan_mgmt=auto` or `all`
+establishes tagged-all mode without an exclusion array. The native network
+must still be explicitly identified and resolved. A present exclusion array
+is validated and respected; an incomplete custom policy is held. Neither a
+missing native network nor an untagged network without a resolvable VLAN ID
+is treated as a default VLAN.
 
 Neighbor relationships describe observations, not Cable segments or link state.
 Passive patch panels and wall outlets are not auto-discovered. One fully resolved

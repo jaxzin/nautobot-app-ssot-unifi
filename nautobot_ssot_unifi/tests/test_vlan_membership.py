@@ -53,6 +53,77 @@ class MembershipTests(TestCase):
             _membership({"portconf_id": "absent"}, profiles, [], {})
         self.assertEqual(caught.exception.reason, "missing-profile")
 
+    def test_agreeing_allow_all_policies_do_not_require_an_exclusion_array(self):
+        for policy in ("auto", "all"):
+            with self.subTest(policy=policy):
+                try:
+                    result = _membership(
+                        {"native_networkconf_id": "a", "forward": "all", "tagged_vlan_mgmt": policy},
+                        {},
+                        [],
+                        {"a": self.a, "b": self.b},
+                    )
+                except _VlanHold as error:
+                    self.fail(f"Explicit agreeing allow-all policy was held: {error.reason}")
+                self.assertEqual(result, ("tagged-all", self.a, []))
+
+    def test_absent_exclusions_require_agreeing_explicit_allow_all_policies(self):
+        for forward in (None, "native", "customize", "invalid"):
+            port = {"native_networkconf_id": "a", "tagged_vlan_mgmt": "auto"}
+            if forward is not None:
+                port["forward"] = forward
+            with self.subTest(forward=forward), self.assertRaises(_VlanHold) as caught:
+                _membership(port, {}, [], {"a": self.a})
+            self.assertEqual(caught.exception.reason, "incomplete-membership")
+        with self.assertRaises(_VlanHold):
+            _membership(
+                {"native_networkconf_id": "a", "forward": "all", "tagged_vlan_mgmt": "custom"},
+                {},
+                [],
+                {"a": self.a},
+            )
+
+    def test_allow_all_does_not_default_absent_or_unresolved_native_networks(self):
+        for native in (None, "missing", "untagged"):
+            port = {"forward": "all", "tagged_vlan_mgmt": "auto"}
+            if native is not None:
+                port["native_networkconf_id"] = native
+            with self.subTest(native=native), self.assertRaises(_VlanHold) as caught:
+                _membership(port, {}, [], {"a": self.a, "untagged": None})
+            self.assertEqual(caught.exception.reason, "incomplete-membership")
+
+    def test_allow_all_does_not_override_present_malformed_exclusions(self):
+        for excluded in (None, "", {}, ["missing"], [None]):
+            with self.subTest(excluded=excluded), self.assertRaises(_VlanHold) as caught:
+                _membership(
+                    {
+                        "native_networkconf_id": "a",
+                        "forward": "all",
+                        "tagged_vlan_mgmt": "auto",
+                        "excluded_networkconf_ids": excluded,
+                    },
+                    {},
+                    [],
+                    {"a": self.a},
+                )
+            self.assertEqual(caught.exception.reason, "incomplete-membership")
+
+    def test_explicit_exclusions_are_preserved_when_forward_is_all(self):
+        self.assertEqual(
+            _membership(
+                {
+                    "native_networkconf_id": "a",
+                    "forward": "all",
+                    "tagged_vlan_mgmt": "auto",
+                    "excluded_networkconf_ids": ["b"],
+                },
+                {},
+                [],
+                {"a": self.a, "b": self.b},
+            ),
+            ("tagged", self.a, []),
+        )
+
     def test_omission_unresolved_and_duplicate_override_are_not_empty(self):
         for port, overrides in [
             ({}, []),
