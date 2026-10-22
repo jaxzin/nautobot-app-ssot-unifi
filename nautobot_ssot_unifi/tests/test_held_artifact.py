@@ -4,12 +4,17 @@ import json
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
+
 from nautobot.ipam.models import Namespace
 from nautobot_ssot.jobs.base import DataSource
+
 from nautobot_ssot_unifi.jobs import UnifiDataSource
+from nautobot_ssot_unifi.ssot._held import _held_report
 
 
 class HeldArtifactTests(TestCase):
+    """Verify held artifact behavior."""
+
     def test_job_publishes_closed_held_projection_without_source_configuration(self):
         job = UnifiDataSource()
         job.create_file = Mock()
@@ -64,7 +69,6 @@ class HeldArtifactTests(TestCase):
         self.assertNotIn("site-a", content)
 
     def test_invalid_reason_and_secret_shaped_identity_fail_closed(self):
-        from nautobot_ssot_unifi.ssot._held import _held_report
 
         for source_id, reason in (
             ("password=synthetic-secret", "missing-platform"),
@@ -77,7 +81,6 @@ class HeldArtifactTests(TestCase):
             self.assertNotIn("synthetic-secret", str(error.exception))
 
     def test_disabled_extensions_do_not_project_binding_holds_as_authoritative_data(self):
-        from nautobot_ssot_unifi.ssot._held import _held_report
 
         source = SimpleNamespace(_held=[{"kind": "device", "source_id": "device-a", "reason": "missing-binding"}])
         self.assertEqual(_held_report(source), {"schema_version": 1, "held": []})

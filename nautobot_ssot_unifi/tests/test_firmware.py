@@ -1,10 +1,17 @@
 """Firmware projections use reported versions, not invented image metadata."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from unittest import TestCase
+
 from nautobot_ssot_unifi.ssot import _firmware
 
 
 class FirmwareTests(TestCase):
+    """Verify firmware behavior."""
+
     def test_reported_version_is_trimmed_without_rewriting_it(self):
         self.assertEqual(_firmware._version("  7.2.34+build.1 \t"), "7.2.34+build.1")
 

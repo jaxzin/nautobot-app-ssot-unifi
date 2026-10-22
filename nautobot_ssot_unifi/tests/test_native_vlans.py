@@ -1,22 +1,36 @@
 """VLAN and membership mutations use native validation and atomic field claims."""
 
-from asgiref.sync import async_to_sync
-from django.test import TestCase
-from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
-from unittest.mock import patch, AsyncMock
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+from asgiref.sync import async_to_sync
 from diffsync.enum import DiffSyncFlags
 from diffsync.exceptions import ObjectNotUpdated
-from nautobot.ipam.models import VLAN, VLANGroup
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+from nautobot.dcim.models import Interface
 from nautobot.extras.models import MetadataType, ObjectMetadata
+from nautobot.ipam.models import VLAN, VLANGroup
+
+from nautobot_ssot_unifi.jobs import UnifiDataSource
 from nautobot_ssot_unifi.ssot._bindings import _BindingSession
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter, UnifiNautobotAdapter
 from nautobot_ssot_unifi.tests import test_native_namespaces as fixtures
-from nautobot_ssot_unifi.jobs import UnifiDataSource
 
 
 class NativeVlanTests(TestCase):
+    """Verify VLAN membership writes and preservation of held evidence."""
+
+    # Initialized by the borrowed NativeNamespaceTests.setUp fixture builder.
+    job: Any
+    integration: Any
+    status: Any
     bind = fixtures.NativeNamespaceTests.bind
     address = fixtures.NativeNamespaceTests.address
 
@@ -33,6 +47,7 @@ class NativeVlanTests(TestCase):
         self.job._unifi_vlan_groups = {"site-a": self.group.pk}
 
     def source(self, rows, port):
+        """Build a source adapter from synthetic inventory evidence."""
         self.job._unifi_bindings = _BindingSession(self.integration.pk)
         session = self.job._unifi_bindings
         session.plan("device", "site-a", "device-a", {"name": self.device.name})
@@ -55,6 +70,7 @@ class NativeVlanTests(TestCase):
         return source
 
     def sync(self, source):
+        """Apply the source adapter to the native target and refresh fixtures."""
         target = UnifiNautobotAdapter(job=self.job)
         target.top_level = source.top_level
         target.load()
@@ -93,6 +109,35 @@ class NativeVlanTests(TestCase):
         self.assertEqual(VLAN.objects.get(pk=original).vid, 11)
         self.sync(self.source([], {}))
         self.assertTrue(VLAN.objects.filter(pk=original).exists())
+
+    def test_agreeing_allow_all_applies_then_omission_retains_and_explicit_removal_clears(self):
+        rows = [{"_id": "net-a", "name": "A", "vlan": 10}, {"_id": "net-b", "name": "B", "vlan": 20}]
+        port = {"native_networkconf_id": "net-a", "forward": "all", "tagged_vlan_mgmt": "auto"}
+        original_id = self.interface.pk
+        source = self.source(rows, port)
+        self.assertFalse(source._held)
+        self.sync(source)
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "tagged-all")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+        self.assertFalse(self.interface.tagged_vlans.exists())
+        claim = ObjectMetadata.objects.get(
+            assigned_object_id=original_id, metadata_type__name="UniFi inventory ownership"
+        )
+        self.assertEqual(set(claim.value["field_paths"]), {"mode", "untagged_vlan", "tagged_vlans"})
+
+        omitted = self.source(rows, {"forward": "all", "tagged_vlan_mgmt": "auto"})
+        self.assertTrue(any(row["reason"] == "incomplete-membership" for row in omitted._held))
+        self.sync(omitted)
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "tagged-all")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+
+        self.sync(self.source(rows, {"native_networkconf_id": "", "tagged_vlan_mgmt": "block_all"}))
+        self.assertEqual(self.interface.pk, original_id)
+        self.assertEqual(self.interface.mode, "access")
+        self.assertIsNone(self.interface.untagged_vlan_id)
+        self.assertFalse(self.interface.tagged_vlans.exists())
 
     def test_wan_config_does_not_poison_complete_tagged_membership(self):
         rows = [
@@ -224,7 +269,6 @@ class NativeVlanTests(TestCase):
         self.assertEqual(list(self.interface.tagged_vlans.values_list("pk", flat=True)), retained)
 
     def test_foreign_interface_claim_holds_only_membership(self):
-        from nautobot.dcim.models import Interface
 
         foreign_type = MetadataType.objects.create(name="Other Interface owner", data_type="json")
         foreign_type.content_types.add(ContentType.objects.get_for_model(Interface))

@@ -1,16 +1,23 @@
 """Native per-reporter neighbor transactions preserve physical inventory."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from datetime import datetime, timedelta, timezone
-from django.test import TestCase
-from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
-from unittest.mock import patch
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
+
 from asgiref.sync import async_to_sync
 from diffsync.enum import DiffSyncFlags
-from diffsync.exceptions import ObjectNotCreated
-from nautobot.dcim.models import Device, Interface, Cable
+from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+from nautobot.dcim.models import Cable, Device, Interface
 from nautobot.extras.models import MetadataType, ObjectMetadata, Relationship, RelationshipAssociation
+
 from nautobot_ssot_unifi.ssot._bindings import _BindingSession
 from nautobot_ssot_unifi.ssot._neighbors import _observation, _read_observation
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter, UnifiNautobotAdapter
@@ -18,6 +25,13 @@ from nautobot_ssot_unifi.tests import test_native_namespaces as fixtures
 
 
 class NativeNeighborTests(TestCase):
+    """Verify last-known neighbor evidence without altering cables."""
+
+    # Initialized by the borrowed NativeNamespaceTests.setUp fixture builder.
+    job: Any
+    integration: Any
+    status: Any
+    tag: Any
     bind = fixtures.NativeNamespaceTests.bind
     address = fixtures.NativeNamespaceTests.address
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -65,6 +79,7 @@ class NativeNeighborTests(TestCase):
             )
 
     def source(self, reporters, now=None):
+        """Build a source adapter from synthetic inventory evidence."""
         now = now or self.now
         source = UnifiAdapter(
             job=self.job,
@@ -86,6 +101,7 @@ class NativeNeighborTests(TestCase):
         return source
 
     def sync(self, source):
+        """Apply the source adapter to the native target and refresh fixtures."""
         target = UnifiNautobotAdapter(job=self.job)
         target.top_level = source.top_level
         target.load()
@@ -133,7 +149,6 @@ class NativeNeighborTests(TestCase):
         self.assertIsNotNone(_read_observation(self.peer.pk, self.integration.pk, "site-a"))
 
     def test_later_sample_cannot_overwrite_a_changed_observation_baseline(self):
-        from diffsync.exceptions import ObjectNotUpdated
 
         stale_source = self.source([(self.interface, [])], self.now + timedelta(seconds=60))
         stale_proofs = dict(self.job._unifi_neighbor_proofs)

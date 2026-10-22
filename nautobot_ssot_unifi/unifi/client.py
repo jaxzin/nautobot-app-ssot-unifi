@@ -39,7 +39,7 @@ class Client:
 
     def __init__(
         self, host: str, username: str, password, port=443, verify_cert=True, timeout=30
-    ):  # pylint:disable=too-many-arguments
+    ):  # pylint:disable=too-many-arguments,too-many-positional-arguments
         """Create a new Unfi API client.
 
         Args:

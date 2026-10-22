@@ -112,6 +112,14 @@ def _membership(port, profiles, overrides, networks):
         if policy == "block_all":
             mode = "access"
         elif policy in {"auto", "all", "custom"}:
+            if (
+                policy in {"auto", "all"}
+                and effective.get("forward") == "all"
+                and "excluded_networkconf_ids" not in effective
+            ):
+                # Two explicit allow-all channels establish the policy without
+                # inventing an empty exclusion list or a native VLAN default.
+                return "tagged-all", untagged, []
             excluded = effective.get("excluded_networkconf_ids")
             if not isinstance(excluded, list) or any(
                 not isinstance(key, str) or key not in networks for key in excluded

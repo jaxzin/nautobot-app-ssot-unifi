@@ -1,20 +1,34 @@
 """Firmware uses native versions and claims without owning shared catalog facts."""
 
-from asgiref.sync import async_to_sync
-from django.test import TestCase
-from django.core.exceptions import ValidationError
-from diffsync.exceptions import ObjectNotUpdated
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
+from typing import Any
 from unittest.mock import patch
-from nautobot.dcim.models import SoftwareVersion, SoftwareImageFile
-from nautobot.extras.models import ObjectMetadata, MetadataType
+
+from asgiref.sync import async_to_sync
+from diffsync.enum import DiffSyncFlags
+from diffsync.exceptions import ObjectNotUpdated
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+from nautobot.dcim.models import SoftwareImageFile, SoftwareVersion
+from nautobot.extras.models import MetadataType, ObjectMetadata
+
 from nautobot_ssot_unifi.ssot import models
 from nautobot_ssot_unifi.ssot._bindings import _BindingSession
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter, UnifiNautobotAdapter
 from nautobot_ssot_unifi.tests import test_native_namespaces as fixtures
-from diffsync.enum import DiffSyncFlags
 
 
 class NativeFirmwareTests(TestCase):
+    """Verify native software-version writes and ownership boundaries."""
+
+    # Initialized by the borrowed NativeNamespaceTests.setUp fixture builder.
+    a: Any
+    job: Any
+    integration: Any
+    status: Any
     bind = fixtures.NativeNamespaceTests.bind
     address = fixtures.NativeNamespaceTests.address
 
@@ -24,6 +38,7 @@ class NativeFirmwareTests(TestCase):
         self.job.sync_firmware = True
 
     def source(self, version):
+        """Build a source adapter from synthetic inventory evidence."""
         self.job._unifi_bindings = _BindingSession(self.integration.pk)
         session = self.job._unifi_bindings
         target_id = session.plan("device", "site-a", "device-a", {"name": self.device.name})
@@ -52,6 +67,7 @@ class NativeFirmwareTests(TestCase):
         return source
 
     def sync(self, source):
+        """Apply the source adapter to the native target and refresh fixtures."""
         target = UnifiNautobotAdapter(job=self.job)
         target.top_level = source.top_level
         target.load()

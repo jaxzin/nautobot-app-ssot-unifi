@@ -25,7 +25,8 @@ from nautobot_ssot_unifi.ssot._held import _publish_held
 name = "Unifi SSoT"  # pylint: disable=invalid-name
 
 
-class _AddressScopesVar(JSONVar):
+# JSONVar subclasses customize one inherited field-construction hook.
+class _AddressScopesVar(JSONVar):  # pylint: disable=too-few-public-methods
     """Preserve native empty JSON lists instead of treating them as omitted."""
 
     def as_field(self):
@@ -42,6 +43,7 @@ class UnifiDataSource(DataSource, Job):
         """Retain last-known inventory when a source object disappears."""
         super().__init__()
         self.diffsync_flags |= DiffSyncFlags.SKIP_UNMATCHED_DST
+        self._unifi_collection_complete = False
 
     debug: bool = BooleanVar(description="Enable for more verbose debug logging", default=False)
     controller: Controller = ObjectVar(description="Unifi Controller to sync with", model=Controller)
@@ -172,19 +174,19 @@ class UnifiDataSource(DataSource, Job):
         sync_neighbors=False,
         vlan_groups=None,
         **kwargs,
-    ):  # pylint: disable=arguments-differ,too-many-arguments,attribute-defined-outside-init
+    ):  # pylint: disable=arguments-differ,too-many-arguments,too-many-locals,attribute-defined-outside-init
         """Perform data synchronization."""
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
         self._unifi_collection_complete = False
-        for name, flag in (
+        for flag_name, flag in (
             ("sync_firmware", sync_firmware),
             ("sync_vlans", sync_vlans),
             ("sync_neighbors", sync_neighbors),
         ):
-            if type(flag) is not bool:
-                raise ValidationError({name: "Must be a boolean."})
+            if not isinstance(flag, bool):
+                raise ValidationError({flag_name: "Must be a boolean."})
         self.sync_firmware = sync_firmware
         self.sync_vlans = sync_vlans
         self.sync_neighbors = sync_neighbors

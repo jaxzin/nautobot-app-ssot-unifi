@@ -1,5 +1,8 @@
 """Persistent source interfaces survive projection without invented identities."""
 
+# Keep synthetic client setup readable and independent in each regression.
+# pylint: disable=duplicate-code
+
 import logging
 from types import SimpleNamespace
 from unittest import TestCase
@@ -9,15 +12,18 @@ from aiounifi.models.device import Device
 from aiounifi.models.site import Site
 from django.db.models import QuerySet
 
+from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 from nautobot_ssot_unifi.unifi.client import Client
-from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
 
 INTEGRATION = "00000000-0000-0000-0000-000000000001"
 
 
 class PersistentInterfaceTests(TestCase):
+    """Verify persistent interface behavior."""
+
     def load(self, namespace=None, address_scope_resolver=None, **tables):
+        """Load a synthetic source snapshot without contacting a controller."""
         raw = {
             "_id": "device-a",
             "name": "test-device",

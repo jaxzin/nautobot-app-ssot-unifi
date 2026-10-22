@@ -1,5 +1,9 @@
 """Address rules reject unsafe mappings before the native sync can write."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -16,6 +20,8 @@ B = "00000000-0000-4000-8000-000000000005"
 
 
 class AddressScopeTests(TestCase):
+    """Verify address scope behavior."""
+
     def test_native_job_json_field_preserves_empty_rules_for_api_and_form(self):
         field = UnifiDataSource._get_vars()["address_scopes"].as_field()
         for value in ([], "[]"):
@@ -28,6 +34,7 @@ class AddressScopeTests(TestCase):
             self.assertIsNone(field.clean(value))
 
     def prepare(self, rules):
+        """Prepare a Job with synthetic controller and address-scope inputs."""
         namespaces = {UUID(A): Namespace(id=A, name="routing-a"), UUID(B): Namespace(id=B, name="routing-b")}
 
         def lookup(**fields):
@@ -58,6 +65,7 @@ class AddressScopeTests(TestCase):
         return job
 
     def resolver(self, rules):
+        """Create an address resolver for the supplied fixture rules."""
         job = self.prepare(rules)
         self.assertIsNotNone(
             getattr(job, "address_scope_resolver", None), "Job must validate and prepare address rules"
