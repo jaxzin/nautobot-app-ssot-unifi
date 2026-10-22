@@ -8,14 +8,17 @@ from diffsync import Adapter
 from nautobot.ipam.models import Namespace
 from nautobot_ssot.contrib import NautobotModel
 from nautobot_ssot.jobs.base import DataSource
+
 from nautobot_ssot_unifi.jobs import UnifiDataSource
 from nautobot_ssot_unifi.ssot.models import IPAddressModel
-
 from nautobot_ssot_unifi.tests import test_persistent_interfaces
 
 
 class NamespaceTests(TestCase):
+    """Verify namespace behavior."""
+
     def address(self, **changes):
+        """Build an address fixture with optional attribute changes."""
         return IPAddressModel(
             host="192.0.2.1",
             parent__namespace__name="routing-a",
@@ -25,6 +28,8 @@ class NamespaceTests(TestCase):
 
     def test_source_mask_change_updates_existing_scoped_address(self):
         class Snapshot(Adapter):
+            """Expose only the model graph required by the fixture."""
+
             ip_address = IPAddressModel
             top_level = ("ip_address",)
 
@@ -49,6 +54,7 @@ class NamespaceTests(TestCase):
         )
 
     def source(self, namespace):
+        """Build a source adapter from synthetic inventory evidence."""
         return test_persistent_interfaces.PersistentInterfaceTests().load(
             namespace=namespace,
             ethernet_table=[{"name": "eth0", "ip": "192.0.2.1", "netmask": "255.255.255.0"}],

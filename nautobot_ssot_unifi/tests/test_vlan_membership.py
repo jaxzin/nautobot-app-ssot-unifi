@@ -2,10 +2,13 @@
 
 from unittest import TestCase
 from uuid import UUID
-from nautobot_ssot_unifi.ssot._vlans import _VlanHold, _networks, _membership
+
+from nautobot_ssot_unifi.ssot._vlans import _membership, _networks, _VlanHold
 
 
 class MembershipTests(TestCase):
+    """Verify membership behavior."""
+
     a = UUID("00000000-0000-0000-0000-000000000001")
     b = UUID("00000000-0000-0000-0000-000000000002")
 

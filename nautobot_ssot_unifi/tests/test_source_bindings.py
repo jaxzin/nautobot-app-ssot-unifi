@@ -1,5 +1,9 @@
 """Exact source identities must resolve native UUIDs, never editable names."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from unittest import TestCase
 from uuid import UUID
 
@@ -13,6 +17,7 @@ OTHER_TARGET = "00000000-0000-0000-0000-000000000011"
 
 
 def record(target=TARGET, kind="device", site="site-a", source="device-a", integration=INTEGRATION):
+    """Build a synthetic ownership record with exact source identity."""
     return {
         "assigned_object_type__app_label": "dcim",
         "assigned_object_type__model": kind,
@@ -29,6 +34,8 @@ def record(target=TARGET, kind="device", site="site-a", source="device-a", integ
 
 
 class InterfaceIdentityTests(TestCase):
+    """Verify interface identity behavior."""
+
     def test_logical_management_binding_cannot_alias_a_real_nic(self):
         management = _bindings._management_id("device-a")
         self.assertEqual(management, '["device-a","management","config_network"]')
@@ -73,6 +80,8 @@ class InterfaceIdentityTests(TestCase):
 
 
 class BindingIndexTests(TestCase):
+    """Verify binding index behavior."""
+
     def test_site_and_integration_and_model_are_part_of_identity(self):
         records = [record(), record(OTHER_TARGET, site="site-b")]
         index = _BindingIndex(records)

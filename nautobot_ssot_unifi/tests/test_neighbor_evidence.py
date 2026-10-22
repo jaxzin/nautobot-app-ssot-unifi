@@ -1,16 +1,20 @@
 """Fresh source evidence, explicit channel presence, and retained observations."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from uuid import UUID
-from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _pair
+
+from nautobot_ssot_unifi.ssot._neighbors import _evidence, _NeighborHold, _observation, _pair
 
 
 class NeighborEvidenceTests(TestCase):
+    """Verify neighbor evidence behavior."""
+
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     peer = UUID("00000000-0000-0000-0000-000000000002")
 
     def device(self, **changes):
+        """Build a device fixture for the tested behavior."""
         return {
             "state": 1,
             "last_seen": self.now.timestamp() - 1,
@@ -20,6 +24,7 @@ class NeighborEvidenceTests(TestCase):
         }
 
     def resolve(self, chassis, port, kind):
+        """Resolve a synthetic peer against the bound fixture identities."""
         if (chassis, port, kind) != ("peer-mac", "eth0", "ifname"):
             raise _NeighborHold("unresolved-endpoint")
         return self.peer

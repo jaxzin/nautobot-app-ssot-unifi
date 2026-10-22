@@ -1,24 +1,40 @@
 """Binding resolution against real native metadata, independent of display names."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+# Scenario-specific imports isolate the dependencies of each native regression.
+# pylint: disable=import-outside-toplevel
+
+from typing import Any
+from unittest.mock import patch
+
+from diffsync import Adapter
+from diffsync.enum import DiffSyncFlags
+from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.test import TestCase
-from unittest.mock import patch
-from diffsync import Adapter
-from diffsync.enum import DiffSyncFlags
 from nautobot.dcim.models import Device, Interface
 from nautobot.extras.models import ExternalIntegration, MetadataType, ObjectMetadata
 
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingIndex
-from nautobot_ssot_unifi.tests import test_native_namespaces as native_namespaces
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapterMixin, UnifiNautobotAdapter
 from nautobot_ssot_unifi.ssot.models import DeviceModel, InterfaceModel
-from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
+from nautobot_ssot_unifi.tests import test_native_namespaces as native_namespaces
 
 INTEGRATION = "00000000-0000-0000-0000-000000000001"
 
 
 class NativeBindingTests(TestCase):
+    """Verify exact bindings and atomic ownership claims."""
+
+    # Initialized by the borrowed NativeNamespaceTests.setUp fixture builder.
+    a: Any
+    job: Any
+    integration: Any
+    status: Any
+    tag: Any
     # Reuse existing native fixture builders, without inheriting their tests.
     address = native_namespaces.NativeNamespaceTests.address
 
@@ -31,6 +47,7 @@ class NativeBindingTests(TestCase):
         )
 
     def bind(self, target, source_id, site_id="site-a"):
+        """Attach an exact source identity to a native fixture object."""
         metadata = ObjectMetadata(
             metadata_type=self.metadata_type,
             assigned_object=target,
@@ -127,6 +144,8 @@ class NativeBindingTests(TestCase):
         )
 
         class Snapshot(UnifiAdapterMixin, Adapter):
+            """Expose only the model graph required by the fixture."""
+
             top_level = ("device", "interface")
 
         source = Snapshot()
@@ -166,6 +185,7 @@ class NativeBindingTests(TestCase):
         self.assertEqual(source.diff_to(target, flags=DiffSyncFlags.SKIP_UNMATCHED_DST).summary()["update"], 0)
 
     def device_attrs(self, name="brand-new-device"):
+        """Return source attributes for the fixture device."""
         return {
             "name": name,
             "device_type__model": self.device.device_type.model,
@@ -292,13 +312,15 @@ class NativeBindingTests(TestCase):
         self.assertFalse(Device.objects.filter(pk=target_id).exists())
         self.assertFalse(ObjectMetadata.objects.filter(assigned_object_id=other.pk).exists())
 
-    def test_job_reports_failure_after_an_independent_update_commits(self):
+    def test_job_reports_failure_after_an_independent_update_commits(self):  # pylint: disable=too-many-locals
+        from types import SimpleNamespace
+
+        import structlog
         from django.contrib.auth import get_user_model
         from nautobot.extras.models import JobResult
+
         from nautobot_ssot_unifi.jobs import UnifiDataSource
         from nautobot_ssot_unifi.ssot._bindings import _BindingSession
-        import structlog
-        from types import SimpleNamespace
 
         self.bind(self.device, "device-a")
         other = Device.objects.create(
@@ -315,11 +337,13 @@ class NativeBindingTests(TestCase):
         session = _BindingSession(self.integration.pk)
 
         class Snapshot(UnifiAdapterMixin, Adapter):
+            """Expose only the model graph required by the fixture."""
+
             top_level = ("device",)
 
         source = Snapshot()
-        source._held = []
-        for obj, source_id, name in [
+        source._held = []  # pylint: disable=attribute-defined-outside-init
+        for _obj, source_id, name in [
             (self.device, "device-a", "failed-change"),
             (other, "device-b", "committed-change"),
         ]:
@@ -369,12 +393,14 @@ class NativeBindingTests(TestCase):
             structlog.configure(**config)
 
     def test_unavailable_management_evidence_does_not_clear_native_primaries(self):
+        import logging
+        from types import SimpleNamespace
+
         from aiounifi.models.device import Device as UnifiDevice
         from aiounifi.models.site import Site
+
         from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
         from nautobot_ssot_unifi.unifi.client import Client
-        from types import SimpleNamespace
-        import logging
 
         self.bind(self.device, "device-a")
         self.job.controller = SimpleNamespace(name="contract-controller", external_integration=self.integration)
@@ -387,7 +413,7 @@ class NativeBindingTests(TestCase):
 
         for evidence in (None, {}):
 
-            async def devices(_client):
+            async def devices(_client, network_evidence=evidence):
                 return [
                     UnifiDevice(
                         {
@@ -396,7 +422,7 @@ class NativeBindingTests(TestCase):
                             "model": "TEST",
                             "type": "uap",
                             "serial": "",
-                            "config_network": evidence,
+                            "config_network": network_evidence,
                         }
                     )
                 ]
@@ -431,13 +457,15 @@ class NativeBindingTests(TestCase):
             self.assertEqual(self.device.name, "independent-rename")
 
     def test_unavailable_management_evidence_cannot_overwrite_newer_primary(self):
+        import logging
+        from types import SimpleNamespace
+
         from aiounifi.models.device import Device as UnifiDevice
         from aiounifi.models.site import Site
+        from nautobot.ipam.models import IPAddressToInterface
+
         from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
         from nautobot_ssot_unifi.unifi.client import Client
-        from nautobot.ipam.models import IPAddressToInterface
-        from types import SimpleNamespace
-        import logging
 
         self.bind(self.device, "device-a")
         self.device.primary_ip4 = None

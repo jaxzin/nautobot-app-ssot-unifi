@@ -1,17 +1,22 @@
 """Real native DiffSync/ORM namespace and primary-ordering regressions."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import structlog
 from aiounifi.models.device import Device as UnifiDevice
 from aiounifi.models.site import Site
 from diffsync import Adapter
 from diffsync.enum import DiffSyncFlags
 from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
 from django.apps import apps
-from django.contrib.contenttypes.models import ContentType
 from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from nautobot.dcim.models import (
@@ -25,24 +30,27 @@ from nautobot.dcim.models import (
     Manufacturer,
     Platform,
 )
-from nautobot.extras.models import ExternalIntegration, JobResult, MetadataType, ObjectMetadata, Role, Status, Tag
 from nautobot.extras.management import populate_status_choices
+from nautobot.extras.models import ExternalIntegration, JobResult, MetadataType, ObjectMetadata, Role, Status, Tag
 from nautobot.ipam.models import IPAddress, IPAddressToInterface, Namespace, Prefix
 
 from nautobot_ssot_unifi.const import UNIFI_SSOT_TAG
 from nautobot_ssot_unifi.jobs import UnifiDataSource
+from nautobot_ssot_unifi.ssot._bindings import _BindingSession
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapterMixin, UnifiNautobotAdapter
 from nautobot_ssot_unifi.ssot.models import IPAddressModel, IPAddressToInterfaceModel, PrefixModel
 from nautobot_ssot_unifi.unifi.client import Client
-from nautobot_ssot_unifi.ssot._bindings import _BindingSession
-import structlog
 
 
 class Snapshot(UnifiAdapterMixin, Adapter):
+    """Expose only the model graph required by the fixture."""
+
     top_level = ("prefix", "ip_address", "device", "interface", "ip_address_to_interface")
 
 
 class NativeNamespaceTests(TestCase):
+    """Verify native namespace isolation and source-binding behavior."""
+
     def setUp(self):
         populate_status_choices(apps, None)
         self.tag, _ = Tag.objects.get_or_create(name=UNIFI_SSOT_TAG)
@@ -60,6 +68,7 @@ class NativeNamespaceTests(TestCase):
         self.job._unifi_bindings = _BindingSession(self.integration.pk)
 
     def bind(self, target, source_id, site_id="site-a"):
+        """Attach an exact source identity to a native fixture object."""
         metadata = ObjectMetadata(
             metadata_type=MetadataType.objects.get(name="UniFi inventory ownership"),
             assigned_object=target,
@@ -96,9 +105,10 @@ class NativeNamespaceTests(TestCase):
             self.assertEqual(
                 (obj.mask_length, obj.parent.prefix_length, obj.parent.namespace_id), (25, 25, namespace.pk)
             )
-        self.assertNotEqual(*addresses)
+        self.assertNotEqual(addresses[0], addresses[1])
 
     def fixture(self, bound=True):
+        """Create a native device, interface, controller, and optional bindings."""
         role = Role.objects.create(name="contract-role")
         role.content_types.add(ContentType.objects.get_for_model(Device))
         maker = Manufacturer.objects.create(name="contract-maker")
@@ -134,6 +144,7 @@ class NativeNamespaceTests(TestCase):
         return device, interface
 
     def address(self, namespace, prefix, address):
+        """Create an address and its containing prefix in the supplied namespace."""
         parent = Prefix.objects.create(namespace=namespace, prefix=prefix, type="network", status=self.status)
         parent.tags.add(self.tag)
         obj = IPAddress.objects.create(parent=parent, address=address, status=self.status)
@@ -141,6 +152,7 @@ class NativeNamespaceTests(TestCase):
         return obj
 
     def source(self, namespace=None, device_name="contract-device"):
+        """Build a source adapter from synthetic inventory evidence."""
         namespace = namespace or self.a
         source = Snapshot()
         self.job._unifi_bindings = _BindingSession(self.integration.pk)
@@ -196,6 +208,7 @@ class NativeNamespaceTests(TestCase):
         return source
 
     def sync(self, source, flags=DiffSyncFlags.SKIP_UNMATCHED_DST):
+        """Apply the source adapter to the native target and refresh fixtures."""
         target = UnifiNautobotAdapter(job=self.job)
         target.top_level = Snapshot.top_level
         target.load()
@@ -359,15 +372,15 @@ class NativeNamespaceTests(TestCase):
                     job = UnifiDataSource()
                     job.job_result = JobResult.objects.create(name="contract-unifi", user=user)
                     with patch.object(Client, "get_sites", sites), patch.object(Client, "get_devices", devices):
-                        kwargs = dict(
-                            dryrun=rules == valid,
-                            debug=False,
-                            controller=controller,
-                            default_location=None,
-                            location_type=None,
-                            namespace=self.a,
-                            address_scopes=rules,
-                        )
+                        kwargs = {
+                            "dryrun": rules == valid,
+                            "debug": False,
+                            "controller": controller,
+                            "default_location": None,
+                            "location_type": None,
+                            "namespace": self.a,
+                            "address_scopes": rules,
+                        }
                         if rules == valid:
                             job.run(**kwargs)
                         else:

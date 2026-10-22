@@ -1,8 +1,9 @@
 """Loopback-only settings for checking the supported Nautobot runtime."""
 
-from nautobot.core.settings import *  # noqa: F403
+from nautobot.core.settings import *  # noqa: F401,F403
 
-SECRET_KEY = "development-only-runtime-compatibility-check"
+# Fixed value for loopback-only disposable tests, never a deployment credential.
+SECRET_KEY = "development-only-runtime-compatibility-check"  # nosec B105
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
 PLUGINS = ["nautobot_ssot", "nautobot_ssot_unifi"]
 PLUGINS_CONFIG = {"nautobot_ssot": {}, "nautobot_ssot_unifi": {}}

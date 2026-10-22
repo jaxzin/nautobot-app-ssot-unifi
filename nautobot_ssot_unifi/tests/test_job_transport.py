@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
+
 from diffsync.enum import DiffSyncFlags
 from django.core.exceptions import ValidationError
 from nautobot.ipam.models import Namespace
@@ -14,6 +15,8 @@ from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 
 
 class JobTransportTests(TestCase):
+    """Verify job transport behavior."""
+
     def test_adapter_forwards_native_constructor_arguments(self):
         adapter = UnifiAdapter(
             job=SimpleNamespace(),

@@ -1,5 +1,9 @@
 """Source-owned synchronization refuses implicit adoption of unrelated inventory."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -13,6 +17,8 @@ from nautobot_ssot_unifi.ssot.models import DeviceTypeModel, IPAddressToInterfac
 
 
 class InventoryOwnershipTests(TestCase):
+    """Verify inventory ownership behavior."""
+
     def test_address_assignments_require_owned_interface_and_address(self):
         # Build the real ORM query without fetching rows. Native associations
         # have no tags of their own: both endpoints must carry ownership.

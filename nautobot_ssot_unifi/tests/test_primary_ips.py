@@ -1,17 +1,24 @@
 """Primary address family values survive deferred device creation."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from diffsync.exceptions import ObjectNotUpdated
-from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
 
+from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
 from nautobot_ssot_unifi.ssot.models import ActiveStatusMixin, DeviceModel, _BoundModelMixin
 
 
 class PrimaryIPTests(TestCase):
+    """Verify primary ip behavior."""
+
     def device(self):
+        """Build a device fixture for the tested behavior."""
         adapter = UnifiNautobotAdapter(job=SimpleNamespace())
         return DeviceModel(
             id="00000000-0000-0000-0000-000000000010",

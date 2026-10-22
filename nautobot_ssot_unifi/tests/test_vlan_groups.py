@@ -2,11 +2,15 @@
 
 from unittest import TestCase
 from uuid import UUID
+
 from django.core.exceptions import ValidationError
+
 from nautobot_ssot_unifi.ssot._vlans import _group_bindings, _included_sites
 
 
 class GroupBindingTests(TestCase):
+    """Verify group binding behavior."""
+
     group = UUID("00000000-0000-0000-0000-000000000001")
 
     def test_exact_entries_and_disabled_validation(self):

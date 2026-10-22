@@ -3,10 +3,11 @@
 import json
 from unittest.mock import MagicMock
 
-from nautobot.extras.models import JobResult
 from nautobot.core.testing import TransactionTestCase
-from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
+from nautobot.extras.models import JobResult
+
 from nautobot_ssot_unifi.jobs import UnifiDataSource
+from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 
 
 def load_json(path):

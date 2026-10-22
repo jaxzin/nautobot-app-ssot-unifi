@@ -1,5 +1,9 @@
 """Certificate verification at the aiounifi configuration boundary."""
 
+# White-box regressions intentionally exercise private connector boundaries.
+# Repeated fixture arrangements keep each regression independently readable.
+# pylint: disable=protected-access,duplicate-code
+
 import ssl
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
@@ -8,6 +12,8 @@ from nautobot_ssot_unifi.unifi.client import Client
 
 
 class ClientTransportTests(IsolatedAsyncioTestCase):
+    """Verify client transport behavior."""
+
     async def test_vlan_channel_is_get_only_and_discards_credentials(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         client.logged_in = True

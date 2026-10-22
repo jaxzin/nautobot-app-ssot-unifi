@@ -1,5 +1,8 @@
 """Source selection and connection lifetime without a live controller."""
 
+# Keep synthetic client setup readable and independent in each regression.
+# pylint: disable=duplicate-code
+
 import asyncio
 import csv
 import logging
@@ -8,16 +11,18 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-from aiounifi.models.site import Site
 from aiounifi.models.device import Device
+from aiounifi.models.site import Site
 from django.db.models import QuerySet
-from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
 
+from nautobot_ssot_unifi.ssot._bindings import _BindingIndex
 from nautobot_ssot_unifi.ssot.adapters import UnifiAdapter
 from nautobot_ssot_unifi.unifi.client import Client
 
 
 class SourceLifecycleTests(TestCase):
+    """Verify source lifecycle behavior."""
+
     def setUp(self):
         self.adapter = UnifiAdapter(
             job=SimpleNamespace(
@@ -36,6 +41,7 @@ class SourceLifecycleTests(TestCase):
             asyncio.run(self.adapter.client.logout())
 
     def load(self):
+        """Load a synthetic source snapshot without contacting a controller."""
         with patch.object(_BindingIndex, "from_orm", return_value=_BindingIndex([])), patch.object(
             QuerySet, "exists", return_value=False
         ):
