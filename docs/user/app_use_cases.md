@@ -148,8 +148,9 @@ progress can therefore coexist with an `incomplete-membership` hold.
 | Network `ip_subnet`, such as `192.0.2.1/24` | Prefix `192.0.2.0/24`, linked through `Prefix.vlan` |
 | Enabled DHCP with explicit `dhcpd_start` and `dhcpd_stop` | IP Address Range under that Prefix |
 
-The gateway address and both subnet bounds must resolve to the same existing
-Namespace. WAN configuration is not imported as a LAN subnet. Browse a VLAN's
+Every address in the subnet must resolve to the same existing Namespace;
+uncovered or ambiguous interior ranges hold the subnet import. WAN
+configuration is not imported as a LAN subnet. Browse a VLAN's
 Prefixes, then a Prefix's **IP Address Ranges** tab. A pool is named after its
 source network and contains the reported inclusive start/end addresses. It is
 neither marked fully utilized nor exclusive: configured capacity is not a
@@ -161,7 +162,10 @@ its UUID. A different CIDR or Namespace identifies a different Prefix; the
 previous record is retained. DHCP endpoint or label changes within one Prefix
 update the same range UUID. Missing or invalid subnet/pool facts preserve
 last-known records. Source omission does not delete inventory or migrate it
-between namespaces. Explicit complete membership removal can clear only its
+between namespaces. A subnet import is held with `identity-conflict` if native
+Prefix creation would move an existing DHCP range from another Prefix. The
+existing range and its parent remain intact; review that inventory relationship
+before retrying. Explicit complete membership removal can clear only its
 owned interface fields.
 
 Neighbor relationships describe observations, not Cable segments or link state.

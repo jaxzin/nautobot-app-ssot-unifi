@@ -176,6 +176,13 @@ class _BoundModelMixin:
                 if cls._modelname == "interface"
                 else ("name", "vid", "vlan_group", "status")
             )
+            if cls._modelname == "interface":
+                session = adapter.job._unifi_bindings
+                written = {key.split("__")[0] for key in attrs}
+                newly_claimed = set(ownership.get("field_paths", [])) - session.index.claimed_paths(
+                    "interface", target_id
+                )
+                paths = set(paths) & (written | newly_claimed)
             if "unifi_ownership" in attrs or any(key.split("__")[0] in paths for key in attrs):
                 _claim_available(
                     target_id, adapter.job._unifi_bindings.integration_id, lock=True, model=cls._model, paths=paths

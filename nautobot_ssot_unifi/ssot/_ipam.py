@@ -1,15 +1,56 @@
 """Private native subnet/DHCP extension; source facts never configure networking."""
 
+from collections import Counter, defaultdict
 from ipaddress import ip_interface, ip_address
 from typing import Annotated, Any, ClassVar, Optional
 from uuid import UUID
 
+from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated
+from django.db import transaction
 from nautobot.ipam.models import IPAddressRange, Namespace, Prefix
 from nautobot_ssot.contrib import NautobotModel, ObjectMetadataAnnotation
 
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _CLAIM_PATHS, _OWNERSHIP_TYPE
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot.models import ActiveStatusMixin, _BoundModelMixin
+
+
+def _namespace_covers_subnet(resolver, subnet, namespace_id):
+    """Require one namespace across every interval, including rule gaps."""
+    if resolver.rules is None:
+        return True
+    first, stop = int(subnet.network_address), int(subnet.broadcast_address) + 1
+    events = defaultdict(Counter)
+    events[first]
+    events[stop]
+    for networks, rule_namespace_id, _name in resolver.rules:
+        for network in networks:
+            if network.version != subnet.version:
+                continue
+            start = max(first, int(network.network_address))
+            end = min(stop, int(network.broadcast_address) + 1)
+            if start < end:
+                events[start][rule_namespace_id] += 1
+                events[end][rule_namespace_id] -= 1
+    active = Counter()
+    points = sorted(events)
+    for point in points[:-1]:
+        active.update(events[point])
+        if {key for key, count in active.items() if count > 0} != {namespace_id}:
+            return False
+    return True
+
+
+def _ranges_reparented_by(namespace_id, network, prefix_length):
+    """Mirror native Prefix.save()'s range adoption predicate before writing."""
+    subnet = ip_interface(f"{network}/{prefix_length}").network
+    return IPAddressRange.objects.filter(
+        parent__namespace_id=namespace_id,
+        ip_version=subnet.version,
+        start_host__gte=str(subnet.network_address),
+        end_host__lte=str(subnet.broadcast_address),
+        parent__prefix_length__lt=prefix_length,
+    )
 
 
 def _parent_claim(adapter, target_id, attrs, kind, parent_kind, parent_field, model):
@@ -42,11 +83,38 @@ class _NetworkPrefixModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     ] = None
 
     @classmethod
+    def get_queryset(cls):
+        """The target loader restricts this queryset to exact reviewed bindings."""
+        return Prefix.objects.all()
+
+    @classmethod
     def _guard_extension_fields(cls, adapter, target_id, attrs):
         _parent_claim(adapter, target_id, attrs, "prefix", "vlan", "vlan__id", Prefix)
+        existing = Prefix.objects.filter(pk=target_id).first()
+        namespace = Namespace.objects.get(
+            name=attrs.get("namespace__name", existing.namespace.name if existing else None)
+        )
+        network = attrs.get("network", existing.network if existing else None)
+        length = attrs.get("prefix_length", existing.prefix_length if existing else None)
+        if _ranges_reparented_by(namespace.pk, network, length).select_for_update().exists():
+            raise _BindingHold("identity-conflict")
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        with transaction.atomic():
+            result = super().create(adapter, ids, attrs)
+            # A range appearing after the precheck must not escape native save().
+            if IPAddressRange.objects.filter(parent_id=ids["id"]).exists():
+                raise ObjectNotCreated("identity-conflict")
+            return result
 
     def update(self, attrs):
-        return super().update({"vlan__id": self.vlan__id, **attrs})
+        with transaction.atomic():
+            children = set(IPAddressRange.objects.filter(parent_id=self.id).values_list("pk", flat=True))
+            result = super().update({"vlan__id": self.vlan__id, **attrs})
+            if IPAddressRange.objects.filter(parent_id=self.id).exclude(pk__in=children).exists():
+                raise ObjectNotUpdated("identity-conflict")
+            return result
 
 
 class _IPAddressRangeModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
@@ -68,6 +136,11 @@ class _IPAddressRangeModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     ] = None
 
     @classmethod
+    def get_queryset(cls):
+        """A tag is descriptive; the exact binding is the admission authority."""
+        return IPAddressRange.objects.all()
+
+    @classmethod
     def _guard_extension_fields(cls, adapter, target_id, attrs):
         _parent_claim(adapter, target_id, attrs, "ipaddressrange", "prefix", "parent__id", IPAddressRange)
 
@@ -80,7 +153,7 @@ def _project_network_graph(adapter, site_id, rows, networks):
     session = adapter.job._unifi_bindings
     for row in rows:
         vlan_id = networks.get(row["_id"])
-        if vlan_id is None or "ip_subnet" not in row:
+        if vlan_id is None or "ip_subnet" not in row or row.get("purpose") in {"wan", "wan2"}:
             continue
         try:
             if not isinstance(row["ip_subnet"], str):
@@ -95,6 +168,8 @@ def _project_network_graph(adapter, site_id, rows, networks):
             ):
                 raise ValueError
             namespace = Namespace.objects.get(name=namespace_name)
+            if not _namespace_covers_subnet(adapter.address_scope_resolver, subnet.network, namespace.pk):
+                raise ValueError
         except (ValueError, TypeError):
             adapter._held.append(
                 {"kind": "network_prefix", "site_id": site_id, "source_id": row["_id"], "reason": "invalid-network"}
@@ -102,6 +177,10 @@ def _project_network_graph(adapter, site_id, rows, networks):
             continue
         source_id = f"{row['_id']}:ipv4:{namespace.pk}:{subnet.network}"
         try:
+            if _ranges_reparented_by(
+                namespace.pk, str(subnet.network.network_address), subnet.network.prefixlen
+            ).exists():
+                raise _BindingHold("identity-conflict")
             prefix_id = session.plan(
                 "prefix",
                 site_id,

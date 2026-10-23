@@ -125,6 +125,34 @@ class NativeVlanTests(TestCase):
         self.assertEqual(self.interface.untagged_vlan.vid, 10)
         self.assertFalse(self.interface.tagged_vlans.exists())
 
+    def test_partial_native_update_preserves_foreign_owned_tagged_policy(self):
+        rows = [
+            {"_id": "a", "name": "A", "vlan": 10},
+            {"_id": "b", "name": "B", "vlan": 20},
+            {"_id": "c", "name": "C", "vlan": 30},
+        ]
+        self.sync(self.source(rows, {}))
+        self.interface.mode = "tagged"
+        self.interface.untagged_vlan = VLAN.objects.get(vid=10)
+        self.interface.validated_save()
+        self.interface.tagged_vlans.add(VLAN.objects.get(vid=20))
+        foreign = MetadataType.objects.create(name="Other source field ownership", data_type="json")
+        foreign.content_types.add(ContentType.objects.get_for_model(Interface))
+        claim = ObjectMetadata(metadata_type=foreign, assigned_object=self.interface, scoped_fields=[])
+        claim.value = {
+            "schema_version": 1,
+            "integration_id": "00000000-0000-0000-0000-000000000002",
+            "field_paths": ["mode", "tagged_vlans"],
+        }
+        claim.validated_save()
+        original = claim.value, claim.last_updated
+        self.sync(self.source(rows, {"native_networkconf_id": "c"}))
+        claim.refresh_from_db()
+        self.assertEqual(self.interface.untagged_vlan.vid, 30)
+        self.assertEqual(self.interface.mode, "tagged")
+        self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
+        self.assertEqual((claim.value, claim.last_updated), original)
+
     def test_explicit_default_reference_resolves_to_vlan_one(self):
         rows = [
             {"_id": "native", "name": "Default", "purpose": "corporate", "vlan_enabled": False, "attr_no_delete": True}
