@@ -135,7 +135,9 @@ class _BoundModelMixin:
                     session.check_parent(ids["id"], attrs["device__id"])
                 cls._guard_extension_fields(adapter, ids["id"], attrs)
                 result = session.admit(
-                    cls._modelname, ids["id"], lambda: super(_BoundModelMixin, cls).create(adapter, ids, attrs)
+                    getattr(cls, "_binding_kind", cls._modelname),
+                    ids["id"],
+                    lambda: super(_BoundModelMixin, cls).create(adapter, ids, attrs),
                 )
                 obj = cls._model.objects.get(pk=ids["id"])
                 obj.tags.add(Tag.objects.get(name=UNIFI_SSOT_TAG))
@@ -149,7 +151,7 @@ class _BoundModelMixin:
         try:
             with transaction.atomic():
                 session.lock()
-                session.check(self._modelname, self.id)
+                session.check(getattr(type(self), "_binding_kind", self._modelname), self.id)
                 self._model.objects.select_for_update().get(pk=self.id)
                 # Do not reuse a stale ORM object cached during preview.
                 self.adapter.cache.invalidate_cache()
@@ -393,7 +395,7 @@ class _VlanReference(TypedDict):
 
 
 class VlanInterfaceModel(InterfaceModel):
-    """Opt-in complete native VLAN membership with a transactional claim."""
+    """Opt-in presence-aware native VLAN membership with transactional claims."""
 
     _attributes = InterfaceModel._attributes + ("mode", "untagged_vlan__id", "tagged_vlans", "unifi_ownership")
     mode: str = ""
@@ -404,12 +406,14 @@ class VlanInterfaceModel(InterfaceModel):
     ] = None
 
     def update(self, attrs):
-        """A held dataset cannot overwrite membership even after target loading."""
+        """Only authoritative membership fields may change after target loading."""
         attrs = dict(attrs)
         fields = self._attributes[len(InterfaceModel._attributes) :]
         if self.id in self.adapter.job._unifi_bindings.retained_membership:
+            authoritative = self.adapter.job._unifi_bindings.membership_fields.get(self.id, frozenset())
             for field in fields:
-                attrs.pop(field, None)
+                if field not in authoritative and not (field == "unifi_ownership" and authoritative):
+                    attrs.pop(field, None)
         elif any(field in attrs for field in fields):
             for field in fields:
                 attrs.setdefault(field, getattr(self, field))
@@ -419,7 +423,12 @@ class VlanInterfaceModel(InterfaceModel):
     def _update_obj_with_parameters(cls, obj, parameters, adapter):
         # Native validation sees the desired mode, not a stale tagged set that
         # would forbid an otherwise valid tagged -> access transition.
-        if "mode" in parameters and obj.pk and Interface.objects.filter(pk=obj.pk).exists():
+        if (
+            "mode" in parameters
+            and "tagged_vlans" in parameters
+            and obj.pk
+            and Interface.objects.filter(pk=obj.pk).exists()
+        ):
             obj.tagged_vlans.clear()
         return super()._update_obj_with_parameters(obj, parameters, adapter)
 

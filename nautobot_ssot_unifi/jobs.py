@@ -70,7 +70,10 @@ class UnifiDataSource(DataSource, Job):
     sync_firmware = BooleanVar(
         description="Import reported firmware using native SoftwareVersion records.", default=False
     )
-    sync_vlans = BooleanVar(description="Import site-scoped VLANs and effective interface membership.", default=False)
+    sync_vlans = BooleanVar(
+        description="Import site-scoped VLANs, configured IPv4 subnets/DHCP pools, and verified membership fields.",
+        default=False,
+    )
     sync_neighbors = BooleanVar(
         description="Import last-known interface neighbor observations, not physical cables.", default=False
     )

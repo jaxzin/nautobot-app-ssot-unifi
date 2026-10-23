@@ -48,7 +48,23 @@ def _wan_without_vlan(row):
 
 
 def _non_vlan_network(row):
-    return _wan_without_vlan(row) or (row.get("vlan_enabled") is False and row.get("vlan") is None)
+    return _wan_without_vlan(row) or (
+        row.get("vlan_enabled") is False and row.get("vlan") is None and not _default_lan(row)
+    )
+
+
+def _default_lan(row):
+    """Recognize the protected default corporate LAN, never a missing-key default."""
+    return (
+        row.get("purpose") == "corporate"
+        and row.get("attr_no_delete") is True
+        and row.get("vlan_enabled") is False
+        and row.get("vlan") is None
+    )
+
+
+def _vid(row):
+    return 1 if _default_lan(row) else row.get("vlan")
 
 
 def _networks(networks):
@@ -59,10 +75,10 @@ def _networks(networks):
     ids = Counter(row["_id"] for row in networks)
     candidates = [row for row in networks if not _non_vlan_network(row)]
     names = Counter(row.get("name") for row in candidates if isinstance(row.get("name"), str))
-    vids = Counter(row.get("vlan") for row in candidates if type(row.get("vlan")) is int)
+    vids = Counter(_vid(row) for row in candidates if type(_vid(row)) is int)
     rows, held = [], []
     for row in candidates:
-        vid = row.get("vlan")
+        vid = _vid(row)
         if (
             ids[row["_id"]] > 1
             or (isinstance(row.get("name"), str) and names[row["name"]] > 1)
@@ -73,7 +89,7 @@ def _networks(networks):
             type(vid) is not int
             or not 1 <= vid <= 4094
             or not _text(row.get("name"))
-            or row.get("vlan_enabled") is False
+            or (row.get("vlan_enabled") is False and not _default_lan(row))
         ):
             held.append((row["_id"], "invalid-vlan"))
         else:
@@ -81,7 +97,7 @@ def _networks(networks):
     return rows, held
 
 
-def _membership(port, profiles, overrides, networks):
+def _effective_policy(port, profiles, overrides):
     if (
         not isinstance(port, dict)
         or not isinstance(overrides, list)
@@ -97,7 +113,10 @@ def _membership(port, profiles, overrides, networks):
     profile_id = override.get("portconf_id", port.get("portconf_id"))
     if profile_id and profile_id not in profiles:
         raise _VlanHold("missing-profile")
-    effective = {**profiles.get(profile_id, {}), **port, **override}
+    return {**profiles.get(profile_id, {}), **port, **override}
+
+
+def _native_reference(effective, networks):
     if "native_networkconf_id" not in effective:
         raise _VlanHold("incomplete-membership")
     native = effective["native_networkconf_id"]
@@ -106,6 +125,11 @@ def _membership(port, profiles, overrides, networks):
     untagged = networks[native] if native else None
     if native and untagged is None:
         raise _VlanHold("incomplete-membership")
+    return untagged
+
+
+def _tagged_policy(effective, networks):
+    native = effective.get("native_networkconf_id", "")
     tagged = []
     if "tagged_vlan_mgmt" in effective:
         policy = effective["tagged_vlan_mgmt"]
@@ -119,7 +143,7 @@ def _membership(port, profiles, overrides, networks):
             ):
                 # Two explicit allow-all channels establish the policy without
                 # inventing an empty exclusion list or a native VLAN default.
-                return "tagged-all", untagged, []
+                return "tagged-all", []
             excluded = effective.get("excluded_networkconf_ids")
             if not isinstance(excluded, list) or any(
                 not isinstance(key, str) or key not in networks for key in excluded
@@ -145,4 +169,34 @@ def _membership(port, profiles, overrides, networks):
         raise _VlanHold("incomplete-membership")
     if any(value is None for value in tagged):
         raise _VlanHold("incomplete-membership")
-    return mode, untagged, sorted(set(tagged), key=str)
+    return mode, sorted(set(tagged), key=str)
+
+
+def _membership_fields(port, profiles, overrides, networks):
+    """Return authoritative fields independently, plus any missing-evidence hold."""
+    try:
+        effective = _effective_policy(port, profiles, overrides)
+    except _VlanHold as error:
+        return {}, error.reason
+    fields, reason = {}, None
+    try:
+        fields["untagged_vlan__id"] = _native_reference(effective, networks)
+    except _VlanHold as error:
+        reason = error.reason
+    try:
+        mode, tagged = _tagged_policy(effective, networks)
+        if mode == "tagged" and "untagged_vlan__id" not in fields:
+            # Expanding a custom set requires knowing which VLAN is native.
+            raise _VlanHold("incomplete-membership")
+        fields.update(mode=mode, tagged_vlans=tagged)
+    except _VlanHold as error:
+        reason = error.reason
+    return fields, reason
+
+
+def _membership(port, profiles, overrides, networks):
+    """Complete-policy projection retained for callers requiring all three fields."""
+    fields, reason = _membership_fields(port, profiles, overrides, networks)
+    if reason:
+        raise _VlanHold(reason)
+    return fields["mode"], fields["untagged_vlan__id"], fields["tagged_vlans"]

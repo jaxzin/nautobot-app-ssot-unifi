@@ -15,6 +15,33 @@ from nautobot_ssot_unifi.ssot._held import _held_report
 class HeldArtifactTests(TestCase):
     """Verify held artifact behavior."""
 
+    def test_network_graph_holds_use_closed_inventory_codes_and_discard_extra_data(self):
+        source = SimpleNamespace(
+            _held=[
+                {
+                    "kind": "network_prefix",
+                    "source_id": "network-a",
+                    "reason": "invalid-network",
+                    "raw": "synthetic-secret",
+                },
+                {"kind": "ip_address_range", "source_id": "network-a:dhcp4", "reason": "invalid-dhcp-range"},
+            ]
+        )
+        try:
+            report = _held_report(source)
+        except ValueError:
+            self.fail("Native network graph hold codes were rejected")
+        self.assertEqual(
+            report,
+            {
+                "schema_version": 1,
+                "held": [
+                    {"kind": "network_prefix", "source_id": "network-a", "reason": "invalid-network"},
+                    {"kind": "ip_address_range", "source_id": "network-a:dhcp4", "reason": "invalid-dhcp-range"},
+                ],
+            },
+        )
+
     def test_job_publishes_closed_held_projection_without_source_configuration(self):
         job = UnifiDataSource()
         job.create_file = Mock()

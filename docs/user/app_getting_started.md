@@ -11,7 +11,7 @@ To install the App, please follow the instructions detailed in the [Installation
 - An existing Controller with a location and an External Integration for the UniFi endpoint.
 - A Secrets Group on that integration containing HTTP username and password entries for a read-only account.
 - Existing destination Namespaces. Leaving **Namespace** empty selects the existing `Global` namespace.
-- A JSON MetadataType named **UniFi inventory ownership**, attached to Device, Interface, and VLAN. Existing Devices and Interfaces need reviewed exact source-ID bindings before import; names, serials, and MACs alone do not authorize adoption.
+- A JSON MetadataType named **UniFi inventory ownership**, attached to Device, Interface, VLAN, Prefix, and IP Address Range. Existing inventory needs reviewed exact source-ID bindings before import; names, serials, MACs, and matching subnets alone do not authorize adoption.
 
 The Job uses the External Integration's TLS verification and timeout settings. Keep certificate verification enabled for a controller with a trusted certificate.
 
