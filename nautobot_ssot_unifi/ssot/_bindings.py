@@ -10,8 +10,10 @@ _CLAIM_PATHS = {
     "device": frozenset({"software_version"}),
     "interface": frozenset({"mode", "untagged_vlan", "tagged_vlans"}),
     "vlan": frozenset({"name", "vid", "vlan_group", "status"}),
+    "prefix": frozenset({"namespace", "network", "prefix_length", "type", "vlan"}),
+    "ipaddressrange": frozenset({"name", "start_host", "end_host", "parent"}),
 }
-_APP_LABELS = {"device": "dcim", "interface": "dcim", "vlan": "ipam"}
+_APP_LABELS = {"device": "dcim", "interface": "dcim", "vlan": "ipam", "prefix": "ipam", "ipaddressrange": "ipam"}
 
 
 def _text(value):
@@ -190,6 +192,7 @@ class _BindingSession:
         self.retained_primaries = {}
         self.retained_firmware = {}
         self.retained_membership = {}
+        self.membership_fields = {}
 
     def observe_interfaces(self, site_id, device_id, source_ids):
         """Hold OS-only substitutions when an old OS identity is also omitted."""
@@ -203,9 +206,15 @@ class _BindingSession:
     @staticmethod
     def _model(kind):
         from nautobot.dcim.models import Device, Interface
-        from nautobot.ipam.models import VLAN
+        from nautobot.ipam.models import VLAN, Prefix, IPAddressRange
 
-        return {"device": Device, "interface": Interface, "vlan": VLAN}[kind]
+        return {
+            "device": Device,
+            "interface": Interface,
+            "vlan": VLAN,
+            "prefix": Prefix,
+            "ipaddressrange": IPAddressRange,
+        }[kind]
 
     def targets(self, kind):
         return [

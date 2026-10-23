@@ -1,7 +1,7 @@
 # Import firmware, VLANs, and neighbors
 
 Use **Unifi to Nautobot** to populate reported firmware, site-scoped VLANs,
-interface membership, and last-known neighbor relationships. This reference
+configured subnets and DHCP pools, interface membership, and last-known neighbor relationships. This reference
 applies to Nautobot 3.2.4 with SSoT 4.6.1. UniFi remains read-only.
 
 ## Prepare the inventory
@@ -13,7 +13,7 @@ MetadataType separately.
 
 | Prerequisite | Native definition |
 | --- | --- |
-| UniFi inventory ownership | JSON MetadataType on Device, Interface, and VLAN |
+| UniFi inventory ownership | JSON MetadataType on Device, Interface, VLAN, Prefix, and IP Address Range |
 | UniFi neighbor observations | JSON MetadataType on Interface |
 | Last-known UniFi neighbors | Relationship with key `unifi_observed_neighbor`, type `symmetric-many-to-many`, and both endpoints `dcim.interface` |
 | Neighbor labels | Relationship, source, and destination label `Last-known UniFi neighbors`; neither side required |
@@ -46,12 +46,18 @@ uses `["device-a","ifname","eth0"]`. The logical management address-holder
 uses `["device-a","management","config_network"]`; it is not a physical NIC
 and cannot report or receive a physical-neighbor observation.
 
+A configured Prefix uses the source identity
+`<network-id>:ipv4:<namespace-uuid>:<canonical-cidr>`. Its DHCP pool uses that
+identity followed by `:dhcp4`. Provision these exact bindings when adopting
+existing IPAM inventory. Source identities do not authorize automatic adoption
+of a matching subnet or address span.
+
 ## Choose Job inputs
 
 | Job data argument | Default | Enabled behavior |
 | --- | --- | --- |
 | `sync_firmware` | `false` | Create/reuse platform-scoped SoftwareVersion and assign owned Device.software_version |
-| `sync_vlans` | `false` | Import explicit VLANs and complete effective Interface membership |
+| `sync_vlans` | `false` | Import VLANs, configured IPv4 subnets, explicit DHCP pools, and independently verified Interface membership fields |
 | `sync_neighbors` | `false` | Import exactly resolved last-known managed-interface neighbors |
 | `vlan_groups` | `null` | Bind immutable source site IDs to existing native VLANGroup UUIDs |
 
@@ -121,18 +127,46 @@ support dates, and other curated fields remain unchanged. No image is fabricated
 Missing Platform, missing version, or a foreign field claim preserves the last
 Device assignment.
 
-VLANs require explicit IDs from 1 through 4094. The connector does not guess
-VLAN 1 when a source identifier is missing. Complete profiles and overrides map
-to native access, tagged, or tagged-all mode. Explicit complete removal can
-clear owned membership; missing profiles or fields cannot. Source omission
-does not delete VLANs or move IPAM records between namespaces.
+VLAN IDs range from 1 through 4094. The protected default corporate LAN
+(`purpose=corporate`, `attr_no_delete=true`, `vlan_enabled=false`, no explicit
+VID) maps to VLAN 1. WANs and arbitrary untagged networks do not. A missing
+port network reference is never replaced with an assumed VLAN 1.
 
-An explicit `forward=all` together with `tagged_vlan_mgmt=auto` or `all`
-establishes tagged-all mode without an exclusion array. The native network
-must still be explicitly identified and resolved. A present exclusion array
-is validated and respected; an incomplete custom policy is held. Neither a
-missing native network nor an untagged network without a resolvable VLAN ID
-is treated as a default VLAN.
+Profiles, port facts, and overrides determine authoritative membership fields.
+An explicit native network reference updates `Interface.untagged_vlan` even
+when tagged policy is unavailable. Explicit `forward=all` establishes
+`tagged-all` mode and an empty explicit tagged set without replacing an omitted
+native assignment. A complete block-all policy establishes access mode.
+Custom sets require complete native and tagged/exclusion evidence. Present
+arrays are validated; omitted fields retain last-known values. Partial
+progress can therefore coexist with an `incomplete-membership` hold.
+
+### Browse configured subnets and DHCP pools
+
+| Source fact | Native record |
+| --- | --- |
+| Network `ip_subnet`, such as `192.0.2.1/24` | Prefix `192.0.2.0/24`, linked through `Prefix.vlan` |
+| Enabled DHCP with explicit `dhcpd_start` and `dhcpd_stop` | IP Address Range under that Prefix |
+
+Every address in the subnet must resolve to the same existing Namespace;
+uncovered or ambiguous interior ranges hold the subnet import. WAN
+configuration is not imported as a LAN subnet. Browse a VLAN's
+Prefixes, then a Prefix's **IP Address Ranges** tab. A pool is named after its
+source network and contains the reported inclusive start/end addresses. It is
+neither marked fully utilized nor exclusive: configured capacity is not a
+record of leases, and the connector does not fetch household clients.
+
+Network definitions have exact source ownership independently of prefixes
+derived from managed-interface addresses. Existing Prefix adoption preserves
+its UUID. A different CIDR or Namespace identifies a different Prefix; the
+previous record is retained. DHCP endpoint or label changes within one Prefix
+update the same range UUID. Missing or invalid subnet/pool facts preserve
+last-known records. Source omission does not delete inventory or migrate it
+between namespaces. A subnet import is held with `identity-conflict` if native
+Prefix creation would move an existing DHCP range from another Prefix. The
+existing range and its parent remain intact; review that inventory relationship
+before retrying. Explicit complete membership removal can clear only its
+owned interface fields.
 
 Neighbor relationships describe observations, not Cable segments or link state.
 Passive patch panels and wall outlets are not auto-discovered. One fully resolved
@@ -172,6 +206,8 @@ JobResult/FileProxy permissions.
 | `foreign-owner` | Resolve the conflicting ownership declaration; do not overwrite another source's fields |
 | `invalid-vlan`, `duplicate-vlan` | Correct source VLAN IDs/names or reviewed native group conflicts |
 | `missing-profile`, `incomplete-membership` | Verify complete supported source configuration; last-good membership is retained |
+| `invalid-network` | Verify the IPv4 subnet and that its gateway and bounds resolve to one Namespace |
+| `invalid-dhcp-range` | Verify explicit IPv4 start/end addresses are ordered and contained within the configured subnet |
 | `unresolved-endpoint`, `unsupported-endpoint` | Verify explicit source Device and port identities; only Ethernet neighbors are supported |
 | `incomplete-neighbor-evidence` | Verify source timing and applicable channel completeness; do not treat missing fields as an empty report |
 

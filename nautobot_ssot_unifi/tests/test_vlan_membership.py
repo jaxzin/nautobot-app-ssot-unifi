@@ -3,6 +3,7 @@
 from unittest import TestCase
 from uuid import UUID
 
+from nautobot_ssot_unifi.ssot import _vlans
 from nautobot_ssot_unifi.ssot._vlans import _membership, _networks, _VlanHold
 
 
@@ -11,6 +12,37 @@ class MembershipTests(TestCase):
 
     a = UUID("00000000-0000-0000-0000-000000000001")
     b = UUID("00000000-0000-0000-0000-000000000002")
+
+    def test_protected_default_corporate_network_is_vlan_one_not_wan_or_arbitrary_untagged(self):
+        rows, held = _networks(
+            [
+                {
+                    "_id": "default",
+                    "name": "Default",
+                    "purpose": "corporate",
+                    "vlan_enabled": False,
+                    "attr_no_delete": True,
+                },
+                {"_id": "wan", "name": "Internet", "purpose": "wan", "attr_no_delete": True},
+                {"_id": "other", "name": "Other", "purpose": "corporate", "vlan_enabled": False},
+            ]
+        )
+        self.assertEqual(rows, [{"source_id": "default", "vid": 1, "name": "Default"}])
+        self.assertEqual(held, [])
+
+    def test_partial_native_fact_does_not_require_a_tagged_policy(self):
+        parser = getattr(_vlans, "_membership_fields", None)
+        self.assertTrue(callable(parser), "Independent membership projection is missing")
+        fields, reason = parser({"native_networkconf_id": "a"}, {}, [], {"a": self.a})
+        self.assertEqual(fields, {"untagged_vlan__id": self.a})
+        self.assertEqual(reason, "incomplete-membership")
+
+    def test_explicit_allow_all_does_not_invent_an_omitted_native_assignment(self):
+        parser = getattr(_vlans, "_membership_fields", None)
+        self.assertTrue(callable(parser), "Independent membership projection is missing")
+        fields, reason = parser({"forward": "all"}, {}, [], {"a": self.a})
+        self.assertEqual(fields, {"mode": "tagged-all", "tagged_vlans": []})
+        self.assertEqual(reason, "incomplete-membership")
 
     def test_access_all_tagged_selected_and_explicit_removal(self):
         networks = {"a": self.a, "b": self.b}

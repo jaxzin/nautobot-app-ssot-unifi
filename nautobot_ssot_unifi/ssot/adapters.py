@@ -20,12 +20,13 @@ from structlog import BoundLogger
 
 from nautobot_ssot_unifi.const import UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
 from nautobot_ssot_unifi.ssot import models
+from nautobot_ssot_unifi.ssot._ipam import _NetworkPrefixModel, _IPAddressRangeModel, _project_network_graph
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
 from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
-from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership, _VlanHold, _wan_without_vlan
+from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership_fields, _VlanHold, _wan_without_vlan
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
 
 from nautobot_ssot_unifi.unifi import Client
@@ -66,7 +67,9 @@ class UnifiAdapterMixin:
         if self.sync_vlans:
             self.interface = models.VlanInterfaceModel
             self.vlan = models.VLANModel
-            self.top_level = ("vlan",) + self.top_level
+            self.network_prefix = _NetworkPrefixModel
+            self.ip_address_range = _IPAddressRangeModel
+            self.top_level = ("vlan", "network_prefix", "ip_address_range") + self.top_level
         self.sync_neighbors = getattr(job, "sync_neighbors", False) is True
         if self.sync_neighbors:
             self.neighbor = models.NeighborModel
@@ -85,13 +88,20 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         self._configure_extensions(job)
 
     def _load_objects(self, diffsync_model):
+        if diffsync_model._modelname == "prefix" and self.sync_vlans:
+            # Configured subnets have their own exact binding and DiffSync model.
+            for obj in diffsync_model._get_queryset().exclude(pk__in=self.job._unifi_bindings.targets("prefix")):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
         if diffsync_model._modelname == "neighbor":
             targets = self.job._unifi_neighbor_proofs
             for obj in diffsync_model._get_queryset().filter(pk__in=targets):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
             return
-        if diffsync_model._modelname in {"device", "interface", "vlan"}:
-            targets = self.job._unifi_bindings.targets(diffsync_model._modelname)
+        if diffsync_model._modelname in {"device", "interface", "vlan"} or hasattr(diffsync_model, "_binding_kind"):
+            targets = self.job._unifi_bindings.targets(
+                getattr(diffsync_model, "_binding_kind", diffsync_model._modelname)
+            )
             for obj in diffsync_model._get_queryset().filter(pk__in=targets):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
                 retained = self.job._unifi_bindings.retained_primaries.get(obj.pk)
@@ -108,7 +118,10 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
                 retained = self.job._unifi_bindings.retained_membership.get(obj.pk)
                 if retained is not None and diffsync_model._modelname == "interface":
                     target = self.get("interface", str(obj.pk))
+                    authoritative = self.job._unifi_bindings.membership_fields.get(obj.pk, frozenset())
                     for field in models.VlanInterfaceModel._attributes[len(models.InterfaceModel._attributes) :]:
+                        if field in authoritative or (field == "unifi_ownership" and authoritative):
+                            continue
                         setattr(retained, field, getattr(target, field))
             return
         if diffsync_model._modelname == "ip_address_to_interface":
@@ -186,10 +199,20 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self._neighbor_devices = {}
         self._neighbor_interfaces = {}
         self.job._unifi_neighbor_proofs = {}
+        self._network_prefix_keys = set()
 
     @sync_to_async
     def _prepare_bindings(self):
         self.job._unifi_bindings = _BindingSession(self.job.controller.external_integration.pk)
+        if self.sync_vlans:
+            from nautobot.ipam.models import Prefix
+
+            self._network_prefix_keys.update(
+                (obj.namespace.name, str(obj.network), obj.prefix_length)
+                for obj in Prefix.objects.filter(pk__in=self.job._unifi_bindings.targets("prefix")).select_related(
+                    "namespace"
+                )
+            )
         if self.sync_neighbors:
             from nautobot_ssot_unifi.ssot._neighbors import _prerequisites
 
@@ -291,18 +314,24 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         return networks
 
     @sync_to_async
+    def _load_network_graph(self, site_id, raw_networks, networks):
+        _project_network_graph(self, site_id, raw_networks, networks)
+
+    @sync_to_async
     def _load_membership(self, interface, site_id, source_id, port, profiles, overrides, networks):
         from nautobot.dcim.models import Interface
 
         document = dict(self.job._unifi_bindings.documents[("interface", interface.id)])
         interface.unifi_ownership = document
+        fields, reason = _membership_fields(port, profiles, overrides, networks)
         try:
-            mode, untagged, tagged = _membership(port, profiles, overrides, networks)
+            if not fields:
+                raise _VlanHold(reason or "incomplete-membership")
             _claim_available(
                 interface.id,
                 self.job._unifi_bindings.integration_id,
                 model=Interface,
-                paths=("mode", "untagged_vlan", "tagged_vlans"),
+                paths=tuple(field.split("__")[0] for field in fields),
             )
         except (_VlanHold, _FirmwareHold, _BindingHold) as error:
             self._held.append(
@@ -310,12 +339,17 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             )
             self.job._unifi_bindings.retained_membership[interface.id] = interface
             return
-        document["field_paths"] = sorted(set(document["field_paths"]) | {"mode", "untagged_vlan", "tagged_vlans"})
+        authoritative = frozenset(fields)
+        self.job._unifi_bindings.membership_fields[interface.id] = authoritative
+        document["field_paths"] = sorted(set(document["field_paths"]) | {field.split("__")[0] for field in fields})
         self.job._unifi_bindings.documents[("interface", interface.id)] = document
-        self.job._unifi_bindings.retained_membership.pop(interface.id, None)
-        interface.mode = mode
-        interface.untagged_vlan__id = untagged
-        interface.tagged_vlans = [{"id": value} for value in tagged]
+        if reason:
+            self._held.append({"kind": "vlan-membership", "site_id": site_id, "source_id": source_id, "reason": reason})
+            self.job._unifi_bindings.retained_membership[interface.id] = interface
+        else:
+            self.job._unifi_bindings.retained_membership.pop(interface.id, None)
+        for field, value in fields.items():
+            setattr(interface, field, [{"id": entry} for entry in value] if field == "tagged_vlans" else value)
 
     @sync_to_async
     def _load_neighbors(self):
@@ -471,15 +505,17 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
     async def _assign_ip(self, ip: str, netmask: str, interface: str) -> IPNetwork:
         ip_address = IPNetwork(f"{ip}/{netmask}")
         namespace_name = self.address_scope_resolver.resolve(str(ip_address.ip))
-        prefix, created = self.get_or_add_model_instance(
-            self.prefix(
-                namespace__name=namespace_name,
-                network=str(ip_address.network),
-                prefix_length=ip_address.prefixlen,
+        prefix_key = (namespace_name, str(ip_address.network), ip_address.prefixlen)
+        if prefix_key not in self._network_prefix_keys:
+            prefix, created = self.get_or_add_model_instance(
+                self.prefix(
+                    namespace__name=namespace_name,
+                    network=str(ip_address.network),
+                    prefix_length=ip_address.prefixlen,
+                )
             )
-        )
-        if created:
-            await self._debug("Added prefix %s", prefix)
+            if created:
+                await self._debug("Added prefix %s", prefix)
 
         _, created = self.get_or_add_model_instance(
             self.ip_address(
@@ -546,6 +582,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 self._collection_channel = "vlan-configuration"
                 network_rows, profile_rows = await self.client._get_vlan_configuration()
                 networks = await self._load_vlans(site_id, network_rows)
+                await self._load_network_graph(site_id, network_rows, networks)
                 profiles = {}
                 for profile in profile_rows:
                     if not isinstance(profile.get("_id"), str) or not profile["_id"] or profile["_id"] in profiles:

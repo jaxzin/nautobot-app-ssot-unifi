@@ -31,6 +31,37 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         finally:
             await client.logout()
 
+    async def test_network_inventory_fields_survive_without_unrelated_configuration(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        network = {
+            "_id": "native",
+            "name": "Default",
+            "purpose": "corporate",
+            "vlan_enabled": False,
+            "attr_no_delete": True,
+            "ip_subnet": "192.0.2.1/24",
+            "dhcpd_enabled": True,
+            "dhcpd_start": "192.0.2.10",
+            "dhcpd_stop": "192.0.2.100",
+        }
+
+        async def response(request):
+            return {
+                "data": (
+                    [{**network, "x_secret": "synthetic-secret", "unrelated": "discard"}]
+                    if request.path == "/rest/networkconf"
+                    else []
+                )
+            }
+
+        try:
+            with patch.object(client.api, "request", response):
+                networks, _profiles = await client._get_vlan_configuration()
+            self.assertEqual(networks, [network])
+        finally:
+            await client.logout()
+
     async def test_network_purpose_survives_the_credential_safe_projection(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         client.logged_in = True

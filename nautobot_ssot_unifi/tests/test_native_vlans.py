@@ -101,6 +101,66 @@ class NativeVlanTests(TestCase):
         self.assertIsNone(self.interface.untagged_vlan_id)
         self.assertFalse(self.interface.tagged_vlans.exists())
 
+    def test_verified_native_update_preserves_omitted_tagged_policy(self):
+        rows = [
+            {"_id": "a", "name": "A", "vlan": 10},
+            {"_id": "b", "name": "B", "vlan": 20},
+            {"_id": "c", "name": "C", "vlan": 30},
+        ]
+        self.sync(
+            self.source(rows, {"native_networkconf_id": "a", "forward": "customize", "tagged_networkconf_ids": ["b"]})
+        )
+        source = self.source(rows, {"native_networkconf_id": "c"})
+        self.sync(source)
+        self.assertEqual(self.interface.untagged_vlan.vid, 30)
+        self.assertEqual(self.interface.mode, "tagged")
+        self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
+        self.assertTrue(any(row["reason"] == "incomplete-membership" for row in source._held))
+
+    def test_verified_allow_all_preserves_omitted_native_assignment(self):
+        rows = [{"_id": "a", "name": "A", "vlan": 10}]
+        self.sync(self.source(rows, {"native_networkconf_id": "a", "forward": "native"}))
+        self.sync(self.source(rows, {"forward": "all"}))
+        self.assertEqual(self.interface.mode, "tagged-all")
+        self.assertEqual(self.interface.untagged_vlan.vid, 10)
+        self.assertFalse(self.interface.tagged_vlans.exists())
+
+    def test_partial_native_update_preserves_foreign_owned_tagged_policy(self):
+        rows = [
+            {"_id": "a", "name": "A", "vlan": 10},
+            {"_id": "b", "name": "B", "vlan": 20},
+            {"_id": "c", "name": "C", "vlan": 30},
+        ]
+        self.sync(self.source(rows, {}))
+        self.interface.mode = "tagged"
+        self.interface.untagged_vlan = VLAN.objects.get(vid=10)
+        self.interface.validated_save()
+        self.interface.tagged_vlans.add(VLAN.objects.get(vid=20))
+        foreign = MetadataType.objects.create(name="Other source field ownership", data_type="json")
+        foreign.content_types.add(ContentType.objects.get_for_model(Interface))
+        claim = ObjectMetadata(metadata_type=foreign, assigned_object=self.interface, scoped_fields=[])
+        claim.value = {
+            "schema_version": 1,
+            "integration_id": "00000000-0000-0000-0000-000000000002",
+            "field_paths": ["mode", "tagged_vlans"],
+        }
+        claim.validated_save()
+        original = claim.value, claim.last_updated
+        self.sync(self.source(rows, {"native_networkconf_id": "c"}))
+        claim.refresh_from_db()
+        self.assertEqual(self.interface.untagged_vlan.vid, 30)
+        self.assertEqual(self.interface.mode, "tagged")
+        self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
+        self.assertEqual((claim.value, claim.last_updated), original)
+
+    def test_explicit_default_reference_resolves_to_vlan_one(self):
+        rows = [
+            {"_id": "native", "name": "Default", "purpose": "corporate", "vlan_enabled": False, "attr_no_delete": True}
+        ]
+        self.sync(self.source(rows, {"native_networkconf_id": "native", "forward": "all"}))
+        self.assertEqual(self.interface.untagged_vlan.vid, 1)
+        self.assertEqual(self.interface.mode, "tagged-all")
+
     def test_source_rename_vid_change_preserves_uuid_and_missing_source_vlan(self):
         self.sync(self.source([{"_id": "net-a", "name": "A", "vlan": 10}], {}))
         original = VLAN.objects.get(name="A").pk
@@ -154,7 +214,7 @@ class NativeVlanTests(TestCase):
         self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
         self.assertEqual(VLAN.objects.count(), 2)
 
-    def test_explicit_untagged_network_does_not_invent_native_vlan(self):
+    def test_unidentified_untagged_network_retains_native_but_observes_allow_all(self):
         rows = [{"_id": "native", "name": "Untagged", "purpose": "corporate", "vlan_enabled": False}]
         source = self.source(rows, {"native_networkconf_id": "native", "forward": "all"})
         self.assertEqual(
@@ -162,7 +222,7 @@ class NativeVlanTests(TestCase):
         )
         self.sync(source)
         self.assertFalse(VLAN.objects.exists())
-        self.assertEqual(self.interface.mode, "")
+        self.assertEqual(self.interface.mode, "tagged-all")
         self.assertIsNone(self.interface.untagged_vlan_id)
 
     def test_foreign_native_vlan_key_is_held_not_adopted(self):
