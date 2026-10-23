@@ -117,6 +117,20 @@ class NativeVlanTests(TestCase):
         self.assertEqual(list(self.interface.tagged_vlans.values_list("vid", flat=True)), [20])
         self.assertTrue(any(row["reason"] == "incomplete-membership" for row in source._held))
 
+    def test_native_assignment_is_held_when_mode_cannot_be_established(self):
+        rows = [{"_id": "a", "name": "A", "vlan": 10}]
+        self.assertEqual(self.interface.mode, "")
+        source = self.source(rows, {"native_networkconf_id": "a", "forward": "customize", "tagged_vlan_mgmt": "auto"})
+        self.sync(source)
+        self.assertEqual(self.interface.mode, "")
+        self.assertIsNone(self.interface.untagged_vlan_id)
+        self.assertFalse(self.interface.tagged_vlans.exists())
+        self.assertTrue(any(row["reason"] == "incomplete-membership" for row in source._held))
+        claim = ObjectMetadata.objects.get(
+            assigned_object_id=self.interface.pk, metadata_type__name="UniFi inventory ownership"
+        )
+        self.assertEqual(claim.value["field_paths"], [])
+
     def test_verified_allow_all_preserves_omitted_native_assignment(self):
         rows = [{"_id": "a", "name": "A", "vlan": 10}]
         self.sync(self.source(rows, {"native_networkconf_id": "a", "forward": "native"}))

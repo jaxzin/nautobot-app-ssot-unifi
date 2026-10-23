@@ -324,6 +324,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         document = dict(self.job._unifi_bindings.documents[("interface", interface.id)])
         interface.unifi_ownership = document
         fields, reason = _membership_fields(port, profiles, overrides, networks)
+        if fields.get("untagged_vlan__id") is not None and "mode" not in fields:
+            current_mode = Interface.objects.filter(pk=interface.id).values_list("mode", flat=True).first()
+            if not current_mode:
+                # Native validation requires a mode; incomplete source policy
+                # cannot establish one or turn a known VLAN into an access port.
+                fields.pop("untagged_vlan__id")
+                reason = "incomplete-membership"
         try:
             if not fields:
                 raise _VlanHold(reason or "incomplete-membership")

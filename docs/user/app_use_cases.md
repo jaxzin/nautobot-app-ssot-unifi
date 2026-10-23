@@ -140,6 +140,9 @@ native assignment. A complete block-all policy establishes access mode.
 Custom sets require complete native and tagged/exclusion evidence. Present
 arrays are validated; omitted fields retain last-known values. Partial
 progress can therefore coexist with an `incomplete-membership` hold.
+Nautobot requires an interface mode before a native VLAN can be assigned.
+If the source policy is incomplete and the existing mode is blank, the native
+assignment remains held; the connector does not invent access or trunk mode.
 
 ### Browse configured subnets and DHCP pools
 
