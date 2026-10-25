@@ -77,6 +77,11 @@ class UnifiDataSource(DataSource, Job):
     sync_neighbors = BooleanVar(
         description="Import last-known interface neighbor observations, not physical cables.", default=False
     )
+    sync_clients = BooleanVar(
+        description="Import last-known client network and switch-port/AP attachment observations. Requires sync_vlans "
+        "and the UniFi client observation schema.",
+        default=False,
+    )
     vlan_groups = JSONVar(
         description="Optional entries with site_id and existing vlan_group_id UUID; one group per source site.",
         required=False,
@@ -176,6 +181,7 @@ class UnifiDataSource(DataSource, Job):
         sync_vlans=False,
         sync_neighbors=False,
         vlan_groups=None,
+        sync_clients=False,
         **kwargs,
     ):  # pylint: disable=arguments-differ,too-many-arguments,too-many-locals,attribute-defined-outside-init
         """Perform data synchronization."""
@@ -193,6 +199,11 @@ class UnifiDataSource(DataSource, Job):
         self.sync_firmware = sync_firmware
         self.sync_vlans = sync_vlans
         self.sync_neighbors = sync_neighbors
+        if not isinstance(sync_clients, bool):
+            raise ValidationError({"sync_clients": "Must be a boolean."})
+        if sync_clients and not sync_vlans:
+            raise ValidationError({"sync_clients": "Requires sync_vlans for the network facts clients report."})
+        self.sync_clients = sync_clients
         self.vlan_groups = vlan_groups
         self._unifi_vlan_groups = _group_bindings(vlan_groups) if sync_vlans else {}
         self.namespace = namespace if namespace is not None else Namespace.objects.get(name="Global")

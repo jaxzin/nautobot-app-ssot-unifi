@@ -32,6 +32,7 @@ suite = unittest.defaultTestLoader.loadTestsFromNames(
         "nautobot_ssot_unifi.tests.test_native_vlans",
         "nautobot_ssot_unifi.tests.test_native_network_graph",
         "nautobot_ssot_unifi.tests.test_native_neighbors",
+        "nautobot_ssot_unifi.tests.test_native_clients",
     ]
 )
 result = unittest.TextTestRunner(verbosity=2).run(suite)
