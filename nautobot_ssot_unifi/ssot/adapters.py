@@ -2,6 +2,8 @@
 
 from typing import Any, Dict, List
 from datetime import datetime, timezone
+from collections import Counter
+from uuid import UUID
 from diffsync import Adapter
 
 from asgiref.sync import sync_to_async, async_to_sync
@@ -28,6 +30,21 @@ from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership_fields, _VlanHold, _wan_without_vlan
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
+from nautobot_ssot_unifi.ssot._clients import (
+    _MAC as _CLIENT_MAC,
+    _ClientHold,
+    _bound_documents,
+    _client_facts,
+    _entry as _client_entry,
+    _instant,
+    _merge_entry as _merge_client_entry,
+    _observation as _client_observation,
+    _read_observation as _read_client_observation,
+    _read_unresolved as _read_unresolved_clients,
+    _resolve as _resolve_client,
+    _source_time,
+    _unresolved_document,
+)
 
 from nautobot_ssot_unifi.unifi import Client
 
@@ -74,6 +91,12 @@ class UnifiAdapterMixin:
         if self.sync_neighbors:
             self.neighbor = models.NeighborModel
             self.top_level = self.top_level + ("neighbor",)
+        self.sync_clients = getattr(job, "sync_clients", False) is True
+        if self.sync_clients:
+            self.client_observation = models.ClientObservationModel
+            self.vm_client_observation = models.VMClientObservationModel
+            self.unresolved_clients = models.UnresolvedClientsModel
+            self.top_level = self.top_level + ("client_observation", "vm_client_observation", "unresolved_clients")
 
 
 class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
@@ -91,6 +114,17 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         if diffsync_model._modelname == "prefix" and self.sync_vlans:
             # Configured subnets have their own exact binding and DiffSync model.
             for obj in diffsync_model._get_queryset().exclude(pk__in=self.job._unifi_bindings.targets("prefix")):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        if diffsync_model._modelname in {"client_observation", "vm_client_observation"}:
+            targets = [
+                pk for pk, proof in self.job._unifi_client_proofs.items() if proof["kind"] == diffsync_model._kind
+            ]
+            for obj in diffsync_model._get_queryset().filter(pk__in=targets):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        if diffsync_model._modelname == "unresolved_clients":
+            for obj in diffsync_model._get_queryset().filter(pk=self.job._unifi_bindings.integration_id):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
             return
         if diffsync_model._modelname == "neighbor":
@@ -199,6 +233,10 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self._neighbor_devices = {}
         self._neighbor_interfaces = {}
         self.job._unifi_neighbor_proofs = {}
+        self.job._unifi_client_proofs = {}
+        self.job._unifi_client_retire = {}
+        self._client_entries = []
+        self._client_reported = {}
         self._network_prefix_keys = set()
 
     @sync_to_async
@@ -217,6 +255,10 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             from nautobot_ssot_unifi.ssot._neighbors import _prerequisites
 
             _prerequisites()
+        if self.sync_clients:
+            from nautobot_ssot_unifi.ssot._clients import _prerequisites as _client_prerequisites
+
+            _client_prerequisites()
 
     @sync_to_async
     def _target_id(self, kind, site_id, source_id, collision_lookup):
@@ -488,6 +530,113 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     {"kind": "neighbor", "site_id": site_id, "source_id": source_id, "reason": error.reason}
                 )
 
+    @staticmethod
+    def _attachment_id(facts, attach):
+        """Resolve the reporting port/radio Interface; an unresolved radio keeps only the SSID."""
+        entry = attach.get(facts["device"], {})
+        if facts["kind"] == "wired":
+            target = entry.get("ports", {}).get(facts["port_idx"])
+            if target is None:
+                raise _ClientHold("unresolved-endpoint")
+            return target
+        radio = entry.get("radios", {}).get(facts.get("radio_name"))
+        if radio is None:
+            return None
+        target, band = radio
+        if facts.get("radio") is not None and band is not None and band != facts["radio"]:
+            return None
+        return target
+
+    def _client_model(self, kind):
+        return self.client_observation if kind == "interface" else self.vm_client_observation
+
+    @sync_to_async
+    def _load_clients(self, site_id, rows, networks, network_rows, devices, attach):
+        """Project one complete site report; nothing is written when collection raised before this."""
+        from nautobot.dcim.models import Interface
+        from nautobot.virtualization.models import VMInterface
+
+        session = self.job._unifi_bindings
+        vids = {key: None for key in networks}
+        for network in _networks(network_rows)[0]:
+            if networks.get(network["source_id"]) is not None:
+                vids[network["source_id"]] = network["vid"]
+        if any(not isinstance(row.get("mac"), str) or not _CLIENT_MAC.fullmatch(row["mac"]) for row in rows):
+            # An unidentifiable row cannot establish that an earlier client disappeared.
+            raise ValueError("Invalid UniFi client channel.")
+        if any(row.get("site_id") is not None and row["site_id"] != site_id for row in rows):
+            # Contradictory explicit site evidence makes the whole report untrustworthy for this
+            # site: nothing is stored and no absence is inferred. A missing site_id is not rejected.
+            raise ValueError("Invalid UniFi client channel.")
+        counts = Counter(row["mac"].lower() for row in rows)
+        reported = self._client_reported.setdefault(site_id, set())
+        for row in rows:
+            mac = row["mac"].lower()
+            if mac in reported:
+                continue
+            reported.add(mac)
+            if counts[mac] > 1:
+                # Conflicting rows for one MAC establish no single set of facts.
+                self._client_entries.append(
+                    _client_entry(site_id, mac, "ambiguous-binding", [], {}, vids, devices, networks)
+                )
+                continue
+            attachment_id = None
+            try:
+                facts = _client_facts(row, vids, devices)
+                attachment_id = self._attachment_id(facts, attach)
+                kind, target = _resolve_client(mac, session.integration_id, site_id)
+                model = Interface if kind == "interface" else VMInterface
+                previous = _read_client_observation(model, target, session.integration_id, site_id)
+                if previous is not None and _instant(previous["last_seen_at"]) > _source_time(facts["last_seen"]):
+                    raise _ClientHold("incomplete-membership")
+                vlan = row.get("vlan") if type(row.get("vlan")) is int else None
+                document = _client_observation(
+                    previous, session.integration_id, site_id, facts, attachment_id, networks[facts["network_id"]], vlan
+                )
+                self.job._unifi_client_proofs[target] = {"site_id": site_id, "kind": kind}
+                self.job._unifi_client_retire[(site_id, mac)] = (kind, target, document)
+                self.add(self._client_model(kind)(id=target, client_observations=document))
+            except _ClientHold as error:
+                self._client_entries.append(
+                    _client_entry(
+                        site_id, mac, error.reason, error.candidates, row, vids, devices, networks, attachment_id
+                    )
+                )
+
+    @sync_to_async
+    def _finalize_clients(self):
+        """Flip presence for omitted clients and publish the integration's unresolved record."""
+        session = self.job._unifi_bindings
+        integration_id = session.integration_id
+        collected = self._client_reported
+        previous = _read_unresolved_clients(integration_id)
+        prior = {(entry["site_id"], entry["mac"]): entry for entry in (previous or {}).get("clients", [])}
+        entries = [_merge_client_entry(prior.get((e["site_id"], e["mac"])), e) for e in self._client_entries]
+        for entry in (previous or {}).get("clients", []):
+            site, mac = entry["site_id"], entry["mac"]
+            if site not in collected:
+                entries.append(entry)
+            elif mac not in collected[site]:
+                entries.append({**entry, "presence": "not-observed"})
+        for kind, target, value in _bound_documents():
+            site = value["site_id"]
+            if (
+                value["integration_id"] != integration_id
+                or site not in collected
+                or value["mac"] in collected[site]
+                or value["presence"] != "observed"
+            ):
+                continue
+            document = _client_observation(value, integration_id, site, None, None, None, None)
+            self.job._unifi_client_proofs[target] = {"site_id": site, "kind": kind}
+            self.add(self._client_model(kind)(id=target, client_observations=document))
+        self.add(
+            self.unresolved_clients(
+                id=UUID(integration_id), unresolved_clients=_unresolved_document(integration_id, entries)
+            )
+        )
+
     @sync_to_async
     def _debug(self, *args, **kwargs):
         self.job.logger.debug(*args, **kwargs)
@@ -561,6 +710,9 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             if self.sync_neighbors:
                 self._collection_channel = "neighbor-evidence"
                 await self._load_neighbors()
+            if self.sync_clients:
+                self._collection_channel = "client-associations"
+                await self._finalize_clients()
         except ValidationError:
             raise
         except Exception:
@@ -609,6 +761,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 self._neighbor_devices[site_id] = {device.raw["_id"]: device.raw for device in devices}
                 if len(self._neighbor_devices[site_id]) != len(devices):
                     raise ValueError("Duplicate UniFi managed-device source identity.")
+            attach = {}
             for unifi_device in devices:
                 device_source_id = unifi_device.raw["_id"]
                 device_id = await self._target_id(
@@ -688,6 +841,17 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     )
                     if self.sync_neighbors:
                         self._neighbor_interfaces[(site_id, device_source_id, source_id)] = (interface, port)
+                    if self.sync_clients:
+                        entry = attach.setdefault(device_source_id, {"ports": {}, "radios": {}})
+                        radio_by_name = {
+                            row.get("name"): row.get("radio")
+                            for row in unifi_device.raw.get("radio_table", [])
+                            if isinstance(row, dict)
+                        }
+                        if port["port_idx"] is not None:
+                            entry["ports"][port["port_idx"]] = target_id
+                        if port["port_idx"] is None and port["name"] in radio_by_name:
+                            entry["radios"][port["name"]] = (target_id, radio_by_name[port["name"]])
                     if self.sync_vlans:
                         rows = [
                             row
@@ -739,3 +903,15 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                         device.primary_ip6__parent__namespace__name = self.address_scope_resolver.resolve(
                             str(ip_address.ip)
                         )
+
+            if self.sync_clients:
+                self._collection_channel = "client-associations"
+                client_rows = await self.client._get_client_configuration()
+                await self._load_clients(
+                    site_id,
+                    client_rows,
+                    networks,
+                    network_rows,
+                    {device.raw["_id"]: device.raw for device in devices},
+                    attach,
+                )

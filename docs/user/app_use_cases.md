@@ -16,6 +16,10 @@ MetadataType separately.
 | UniFi inventory ownership | JSON MetadataType on Device, Interface, VLAN, Prefix, and IP Address Range |
 | UniFi neighbor observations | JSON MetadataType on Interface |
 | Last-known UniFi neighbors | Relationship with key `unifi_observed_neighbor`, type `symmetric-many-to-many`, and both endpoints `dcim.interface` |
+| UniFi client observations | JSON MetadataType on Interface and VMInterface |
+| UniFi unresolved client observations | JSON MetadataType on External Integration |
+| Client attachment | Relationship key `unifi_observed_client_attachment`, `one-to-many`, source `dcim.interface` (switch port or AP radio), destination `dcim.interface` (client) |
+| VM client attachment | Relationship key `unifi_observed_vm_client_attachment`, `one-to-many`, source `dcim.interface`, destination `virtualization.vminterface` |
 | Neighbor labels | Relationship, source, and destination label `Last-known UniFi neighbors`; neither side required |
 | Firmware dependency | Existing Platform and an Active status applicable to SoftwareVersion |
 | VLAN scope | One existing VLANGroup per included UniFi site |
@@ -59,6 +63,7 @@ of a matching subnet or address span.
 | `sync_firmware` | `false` | Create/reuse platform-scoped SoftwareVersion and assign owned Device.software_version |
 | `sync_vlans` | `false` | Import VLANs, configured IPv4 subnets, explicit DHCP pools, and independently verified Interface membership fields |
 | `sync_neighbors` | `false` | Import exactly resolved last-known managed-interface neighbors |
+| `sync_clients` | `false` | Observe each client's reported network and switch-port or AP attachment on its matched interface; requires `sync_vlans` |
 | `vlan_groups` | `null` | Bind immutable source site IDs to existing native VLANGroup UUIDs |
 
 For example, enable VLAN ingestion for one included site with this Job data:
@@ -157,7 +162,7 @@ configuration is not imported as a LAN subnet. Browse a VLAN's
 Prefixes, then a Prefix's **IP Address Ranges** tab. A pool is named after its
 source network and contains the reported inclusive start/end addresses. It is
 neither marked fully utilized nor exclusive: configured capacity is not a
-record of leases, and the connector does not fetch household clients.
+record of leases. Client observations are separate and opt in (see below).
 
 Network definitions have exact source ownership independently of prefixes
 derived from managed-interface addresses. Existing Prefix adoption preserves
@@ -194,6 +199,54 @@ An eligible omission marks only that reporter's peer entry `not-observed` and
 advances its check time. It retains the edge and last evidence. Reappearance
 reuses them. Failed, stale, or incomplete collection advances none of these
 values and cannot rewrite the other endpoint's evidence.
+
+## Observe client networks and attachments
+
+`sync_clients` (default `false`, requires `sync_vlans`) reads the active-client
+report with a GET-only request and records what each client reports: its
+network, its reported VLAN, and its switch port or access point and SSID. Every
+reported client is in scope. The connector never creates a Device or Virtual
+Machine for a client, and it never writes a client interface's mode, untagged
+VLAN, or tagged VLANs. An SSID default or the VLANs a trunk allows are not a
+client's network; switch-port configuration still imports only through the
+membership path above.
+
+A client is matched in this order:
+
+1. An established binding: the interface already carries a **UniFi client
+   observations** document with the same integration, site, and MAC.
+2. Otherwise exactly one interface, across Interface and VMInterface, whose
+   MAC address matches exactly.
+
+Hostname and IP address are never used. A locally administered MAC is matched
+like any other. Several matching interfaces, a MAC already bound elsewhere, or
+an interface whose MAC no longer agrees with its binding is retained for review.
+
+A matched client's interface receives the **UniFi client observations**
+document: `schema_version`, `integration_id`, `site_id`, `mac`, `presence`,
+`last_seen_at`, `network` (`source_network_id`, `vlan`, `vlan_id`), and
+`attachment` (`kind`, `source_device_id`, `interface_id`, `port_idx`, `essid`,
+`radio_name`). `last_seen_at` is the controller-reported client time. Sync time
+comes from native ObjectMetadata and SSoT history. The attachment point is
+linked to the client with a native Relationship (one attachment point can hold
+many clients; a client has one current attachment). A roam moves it.
+
+Clients that cannot be matched, are ambiguous, or have incomplete evidence are
+kept in the **UniFi unresolved client observations** JSON record on the
+controller's External Integration (Object Metadata tab). The stock screen shows
+the JSON; it has no searchable client table. Each entry has `site_id`, `mac`,
+`reason` (`no-match`, `ambiguous-binding`, `identity-conflict`, `foreign-owner`,
+`unresolved-endpoint`, `incomplete-membership`, or `invalid-vlan`),
+`candidates`, `presence`, `last_seen_at`, `network`, and `attachment`. After a
+client later matches, its matched write must succeed and equal the intended
+facts before the entry is removed.
+
+A client omitted from a complete report becomes `not-observed` and keeps its
+last facts and attachment. A failed or incomplete collection writes nothing. A
+report older than the stored `last_seen_at` is held as `incomplete-membership`.
+A report containing a row without a valid MAC fails the collection, because an
+unidentifiable row cannot show that an earlier client disappeared. SSoT does not wrap a sync in one transaction: each client write is
+atomic, and a run that stops midway leaves both records for the next run.
 
 ## Resolve held records and failures
 

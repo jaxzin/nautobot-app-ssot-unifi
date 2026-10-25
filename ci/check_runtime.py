@@ -31,6 +31,7 @@ suite = unittest.defaultTestLoader.loadTestsFromNames(
         "nautobot_ssot_unifi.tests.test_vlan_membership",
         "nautobot_ssot_unifi.tests.test_neighbor_evidence",
         "nautobot_ssot_unifi.tests.test_held_artifact",
+        "nautobot_ssot_unifi.tests.test_client_facts",
     ]
 )
 result = unittest.TextTestRunner(verbosity=2).run(suite)

@@ -1,6 +1,6 @@
 """Nautobot DiffSync models for Unifi SSoT."""
 
-from typing import TYPE_CHECKING, Annotated, Optional, Any, TypedDict
+from typing import TYPE_CHECKING, Annotated, ClassVar, Optional, Any, TypedDict
 import uuid
 
 from diffsync.exceptions import ObjectNotCreated, ObjectNotUpdated, ObjectNotDeleted
@@ -8,7 +8,8 @@ from django.db import transaction
 from django.core.exceptions import ValidationError
 from nautobot_ssot.contrib import NautobotModel, CustomFieldAnnotation, ObjectMetadataAnnotation
 
-from nautobot.extras.models import Tag, Status, Relationship, RelationshipAssociation
+from nautobot.extras.models import Tag, Status, Relationship, RelationshipAssociation, ExternalIntegration
+from nautobot.virtualization.models import VMInterface
 from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface, SoftwareVersion
 from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface, VLAN
 from nautobot.ipam.choices import PrefixTypeChoices
@@ -25,6 +26,18 @@ from nautobot_ssot_unifi.ssot._neighbors import (
     _utc,
     _OBSERVATION_TYPE,
     _RELATIONSHIP_KEY,
+)
+from nautobot_ssot_unifi.ssot._clients import (
+    _ClientHold,
+    _prerequisites as _client_prerequisites,
+    _read_observation as _read_client_observation,
+    _read_unresolved as _read_unresolved_clients,
+    _resolve as _resolve_client,
+    _retire as _retire_clients,
+    _OBSERVATION_TYPE as _CLIENT_OBSERVATION_TYPE,
+    _UNRESOLVED_TYPE as _CLIENT_UNRESOLVED_TYPE,
+    _RELATIONSHIP_KEY as _CLIENT_RELATIONSHIP_KEY,
+    _VM_RELATIONSHIP_KEY as _VM_CLIENT_RELATIONSHIP_KEY,
 )
 
 if TYPE_CHECKING:
@@ -569,6 +582,197 @@ class NeighborModel(NautobotModel):
     def delete(self):
         """Last-known edges and observation documents are not deleted by this Job."""
         raise ObjectNotDeleted("UniFi neighbor observations are retained.")
+
+
+class _ClientObservationMixin:
+    """Observation write for a client interface: one metadata document plus its attachment association.
+
+    SSoT does not wrap a sync in one transaction; this write is atomic per client only.
+    """
+
+    _kind: ClassVar[str] = ""
+    _relationship_key: ClassVar[str] = ""
+
+    @classmethod
+    def _update_obj_with_parameters(cls, obj, parameters, adapter):
+        """Use the framework's metadata writer without saving the client's interface."""
+        if set(parameters) != {"client_observations"}:
+            raise ValueError("Unsupported UniFi client mutation.")
+        cls._set_object_metadata_fields(
+            {
+                "client_observations": (
+                    cls.get_attr_annotation("client_observations"),
+                    parameters["client_observations"],
+                )
+            },
+            obj,
+            adapter,
+        )
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """A first observation lands on an existing interface, never a new one."""
+        instance = cls(adapter=adapter, pk=ids["id"], **ids)
+        try:
+            return instance.update(attrs)
+        except ObjectNotUpdated:
+            raise ObjectNotCreated("UniFi client observation transaction failed.") from None
+
+    def update(self, attrs):
+        """Re-resolve identity, move the single attachment, then write the document."""
+        session = self.adapter.job._unifi_bindings
+        proof = self.adapter.job._unifi_client_proofs[self.id]
+        document = attrs["client_observations"]
+        try:
+            with transaction.atomic():
+                session.lock()
+                previous = _read_client_observation(
+                    self._model, self.id, session.integration_id, proof["site_id"], lock=True
+                )
+                if previous != self.client_observations:
+                    # The diff used a different baseline; do not erase newer history.
+                    raise _ClientHold("incomplete-membership")
+                _client_prerequisites()
+                self._model.objects.select_for_update().get(pk=self.id)
+                if document["presence"] == "observed":
+                    if _resolve_client(document["mac"], session.integration_id, proof["site_id"]) != (
+                        self._kind,
+                        self.id,
+                    ):
+                        raise _ClientHold("identity-conflict")
+                    self._move_attachment(session, document["attachment"]["interface_id"])
+                self.adapter.cache.invalidate_cache()
+                return super().update(attrs)
+        except (
+            _BindingHold,
+            _ClientHold,
+            ValueError,
+            ValidationError,
+            Interface.DoesNotExist,
+            Relationship.DoesNotExist,
+        ):
+            raise ObjectNotUpdated("UniFi client observation transaction failed.") from None
+
+    def _move_attachment(self, session, attachment_id):
+        relationship = Relationship.objects.get(key=self._relationship_key)
+        current = RelationshipAssociation.objects.filter(relationship=relationship, destination_id=self.id)
+        if attachment_id is None:
+            # Reported on a radio that does not resolve to one AP-radio interface.
+            current.delete()
+            return
+        target = uuid.UUID(attachment_id)
+        session.check("interface", target)
+        session.check_native_parent(target)
+        Interface.objects.select_for_update().get(pk=target)
+        current.exclude(source_id=target).delete()
+        if not current.filter(source_id=target).exists():
+            RelationshipAssociation(
+                relationship=relationship,
+                source_type=relationship.source_type,
+                destination_type=relationship.destination_type,
+                source_id=target,
+                destination_id=self.id,
+            ).validated_save()
+
+    def delete(self):
+        """Last-known client observations are retained."""
+        raise ObjectNotDeleted("UniFi client observations are retained.")
+
+
+class ClientObservationModel(_ClientObservationMixin, NautobotModel):
+    """Observed network/attachment on a matched Device interface."""
+
+    _model = Interface
+    _modelname = "client_observation"
+    _kind: ClassVar[str] = "interface"
+    _relationship_key: ClassVar[str] = _CLIENT_RELATIONSHIP_KEY
+    _identifiers = ("id",)
+    _attributes = ("client_observations",)
+    id: uuid.UUID
+    client_observations: Annotated[
+        Optional[dict[str, Any]],
+        ObjectMetadataAnnotation(metadata_type_name=_CLIENT_OBSERVATION_TYPE, data_type="json"),
+    ] = None
+
+
+class VMClientObservationModel(_ClientObservationMixin, NautobotModel):
+    """Observed network/attachment on a matched virtual machine interface."""
+
+    _model = VMInterface
+    _modelname = "vm_client_observation"
+    _kind: ClassVar[str] = "vminterface"
+    _relationship_key: ClassVar[str] = _VM_CLIENT_RELATIONSHIP_KEY
+    _identifiers = ("id",)
+    _attributes = ("client_observations",)
+    id: uuid.UUID
+    client_observations: Annotated[
+        Optional[dict[str, Any]],
+        ObjectMetadataAnnotation(metadata_type_name=_CLIENT_OBSERVATION_TYPE, data_type="json"),
+    ] = None
+
+
+class UnresolvedClientsModel(NautobotModel):
+    """The integration's pending-review record; entries retire only after the matched write succeeds."""
+
+    _model = ExternalIntegration
+    _modelname = "unresolved_clients"
+    _identifiers = ("id",)
+    _attributes = ("unresolved_clients",)
+    id: uuid.UUID
+    unresolved_clients: Annotated[
+        Optional[dict[str, Any]],
+        ObjectMetadataAnnotation(metadata_type_name=_CLIENT_UNRESOLVED_TYPE, data_type="json"),
+    ] = None
+
+    @classmethod
+    def _update_obj_with_parameters(cls, obj, parameters, adapter):
+        """Write the document without saving the integration itself."""
+        if set(parameters) != {"unresolved_clients"}:
+            raise ValueError("Unsupported UniFi unresolved-client mutation.")
+        cls._set_object_metadata_fields(
+            {
+                "unresolved_clients": (
+                    cls.get_attr_annotation("unresolved_clients"),
+                    parameters["unresolved_clients"],
+                )
+            },
+            obj,
+            adapter,
+        )
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """The integration always exists; this only writes its document."""
+        instance = cls(adapter=adapter, pk=ids["id"], **ids)
+        try:
+            return instance.update(attrs)
+        except ObjectNotUpdated:
+            raise ObjectNotCreated("UniFi unresolved-client transaction failed.") from None
+
+    def update(self, attrs):
+        """Runs after the matched writes; retains any entry whose matched write is unverified."""
+        session = self.adapter.job._unifi_bindings
+        try:
+            with transaction.atomic():
+                session.lock()
+                previous = _read_unresolved_clients(self.id, lock=True)
+                if previous != self.unresolved_clients:
+                    raise _ClientHold("incomplete-membership")
+                _client_prerequisites()
+                document = _retire_clients(
+                    previous,
+                    attrs["unresolved_clients"],
+                    self.adapter.job._unifi_client_retire,
+                    session.integration_id,
+                )
+                self.adapter.cache.invalidate_cache()
+                return super().update({"unresolved_clients": document})
+        except (_BindingHold, _ClientHold, ValueError, ValidationError):
+            raise ObjectNotUpdated("UniFi unresolved-client transaction failed.") from None
+
+    def delete(self):
+        """Pending observations are retained."""
+        raise ObjectNotDeleted("UniFi unresolved client observations are retained.")
 
 
 class PrefixModel(ActiveStatusMixin, UnifiModelMixin, NautobotModel):

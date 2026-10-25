@@ -5,8 +5,11 @@
 # pylint: disable=protected-access,duplicate-code
 
 import ssl
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from aiounifi.errors import AiounifiException
 
 from nautobot_ssot_unifi.unifi.client import Client
 
@@ -127,5 +130,47 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
                 self.assertEqual(list(await client.get_devices()), [])
                 self.assertTrue(client.logged_in)
                 self.assertEqual(len(requests), 1)
+        finally:
+            await client.logout()
+
+    async def test_client_channel_is_get_only_and_projects_association_evidence(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        requests = []
+
+        async def response(request):
+            requests.append((request.method, request.path, request.data))
+            return {
+                "data": [
+                    {
+                        "_id": "c1",
+                        "mac": "02:00:00:00:10:01",
+                        "network_id": "net-iot",
+                        "x_passphrase": "synthetic-secret",
+                        "hostname": "discard",
+                        "ip": "192.0.2.50",
+                    }
+                ]
+            }
+
+        try:
+            with patch.object(client.api, "request", response):
+                clients = await client._get_client_configuration()
+            self.assertEqual(requests, [("get", "/stat/sta", None)])
+            self.assertEqual(clients, [{"_id": "c1", "mac": "02:00:00:00:10:01", "network_id": "net-iot"}])
+            self.assertNotIn("synthetic-secret", repr(clients))
+            self.assertNotIn("192.0.2.50", repr(clients))
+        finally:
+            await client.logout()
+
+    async def test_error_status_report_fails_through_the_sdk_instead_of_looking_empty(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        body = b'{"meta": {"rc": "error", "msg": "api.err.Invalid"}, "data": []}'
+        reply = AsyncMock(return_value=(SimpleNamespace(content_type="application/json"), body))
+        try:
+            with patch.object(client.api.connectivity, "_request", reply):
+                with self.assertRaises(AiounifiException):
+                    await client._get_client_configuration()
         finally:
             await client.logout()

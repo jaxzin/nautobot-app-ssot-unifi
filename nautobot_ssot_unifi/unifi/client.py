@@ -141,3 +141,31 @@ class Client:
                 raise ValueError("Invalid UniFi VLAN configuration channel.")
             projections.append([{key: row[key] for key in fields if key in row} for row in rows])
         return tuple(projections)
+
+    @require_login
+    async def _get_client_configuration(self):
+        """GET only `/stat/sta`; keep association/network evidence, discard everything else.
+
+        A fully parsed, successful report is the only basis for recording a client's
+        absence; an exception here leaves last-known observations untouched.
+        """
+        fields = {
+            "_id",
+            "mac",
+            "is_wired",
+            "sw_mac",
+            "sw_port",
+            "ap_mac",
+            "essid",
+            "radio",
+            "radio_name",
+            "network_id",
+            "vlan",
+            "last_seen",
+            "site_id",
+        }
+        response = await self.api.request(ApiRequest(method="get", path="/stat/sta"))
+        rows = response.get("data")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Invalid UniFi client channel.")
+        return [{key: row[key] for key in fields if key in row} for row in rows]
