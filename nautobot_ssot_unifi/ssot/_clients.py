@@ -343,6 +343,12 @@ def _entry(site_id, mac, reason, candidates, row, vids, devices, vlan_ids, attac
     network_id = row.get("network_id") if isinstance(row.get("network_id"), str) else None
     reported = row.get("vlan") if type(row.get("vlan")) is int else None
     vlan_id = vlan_ids.get(network_id) if network_id else None
+    expected = vids.get(network_id) if network_id else None
+    if (expected is not None and row.get("vlan") is not None and row.get("vlan") != expected) or (
+        row.get("vlan") is not None and type(row.get("vlan")) is not int
+    ):
+        # A reported VLAN that contradicts its network is not a coherent group.
+        network_id, reported, vlan_id = None, None, None
     wired = row.get("is_wired") if type(row.get("is_wired")) is bool else None
     device = None
     try:

@@ -328,6 +328,15 @@ class NativeClientTests(TestCase):
         self.assertEqual(roamed["attachment"]["port_idx"], 2)
         self.assertEqual(roamed["attachment"]["kind"], "wired")
 
+    def test_contradictory_vlan_keeps_the_pending_network_group(self):
+        mac = "02:00:00:00:10:99"
+        self.sync(self.source([wired(mac=mac, seen=1760000100)]))
+        rich = self.pending()[(SITE, mac)]
+        self.sync(self.source([wired(mac=mac, vlan=30, seen=1760000200)]))
+        held = self.pending()[(SITE, mac)]
+        self.assertEqual(held["reason"], "incomplete-membership")
+        self.assertEqual(held["network"], rich["network"])
+
     def test_explicit_site_mismatch_fails_the_collection_and_preserves_pending_and_matched_facts(self):
         self.sync(self.source([wired(), wired(mac="02:00:00:00:10:99")]))
         pending, matched = self.pending(), _read_observation(Interface, self.client_nic.pk, self.integration.pk, SITE)
