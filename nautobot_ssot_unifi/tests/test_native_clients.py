@@ -313,6 +313,21 @@ class NativeClientTests(TestCase):
         self.assertEqual(incomplete["network"], rich["network"])
         self.assertEqual(incomplete["last_seen_at"], "2025-10-09T08:56:40Z")
 
+    def test_missing_port_keeps_the_pending_attachment_until_a_complete_roam_replaces_it(self):
+        mac = "02:00:00:00:10:99"
+        self.sync(self.source([wired(mac=mac, port=1, seen=1760000100)]))
+        rich = self.pending()[(SITE, mac)]
+        row = wired(mac=mac, seen=1760000200)
+        del row["sw_port"]
+        self.sync(self.source([row]))
+        held = self.pending()[(SITE, mac)]
+        self.assertEqual(held["reason"], "incomplete-membership")
+        self.assertEqual(held["attachment"], rich["attachment"])
+        self.sync(self.source([wired(mac=mac, port=2, seen=1760000300)]))
+        roamed = self.pending()[(SITE, mac)]
+        self.assertEqual(roamed["attachment"]["port_idx"], 2)
+        self.assertEqual(roamed["attachment"]["kind"], "wired")
+
     def test_explicit_site_mismatch_fails_the_collection_and_preserves_pending_and_matched_facts(self):
         self.sync(self.source([wired(), wired(mac="02:00:00:00:10:99")]))
         pending, matched = self.pending(), _read_observation(Interface, self.client_nic.pk, self.integration.pk, SITE)

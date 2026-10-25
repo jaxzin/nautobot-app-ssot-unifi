@@ -162,7 +162,6 @@ configuration is not imported as a LAN subnet. Browse a VLAN's
 Prefixes, then a Prefix's **IP Address Ranges** tab. A pool is named after its
 source network and contains the reported inclusive start/end addresses. It is
 neither marked fully utilized nor exclusive: configured capacity is not a
-neither marked fully utilized nor exclusive: configured capacity is not a
 record of leases. Client observations are separate and opt in (see below).
 
 Network definitions have exact source ownership independently of prefixes

@@ -471,12 +471,25 @@ def _retire(previous, document, retire, integration_id):
     return _unresolved_document(integration_id, entries.values())
 
 
+def _network_complete(network):
+    return network["source_network_id"] is not None
+
+
+def _attachment_complete(attachment):
+    if attachment["source_device_id"] is None:
+        return False
+    if attachment["kind"] == "wired":
+        return attachment["port_idx"] is not None
+    return attachment["kind"] == "wireless" and attachment["essid"] is not None
+
+
 def _merge_entry(previous, new):
     """Fold a new pending entry over the last-known one without erasing valid facts.
 
-    An older report keeps the previous entry unchanged. A report with no source
-    time, no network, or no attachment kind keeps the previous value for that
-    fact. Units are kept whole so a wired port is never mixed into a wireless entry.
+    An older report keeps the previous entry unchanged. The source time, network
+    and attachment are separate groups; each replaces the previous group only
+    when the new report's group is complete, and is otherwise retained whole, so
+    a wired port is never mixed into a wireless attachment.
     """
     if previous is None:
         return new
@@ -486,8 +499,8 @@ def _merge_entry(previous, new):
     merged = dict(new)
     if seen is None:
         merged["last_seen_at"] = before
-    if new["network"]["source_network_id"] is None:
+    if not _network_complete(new["network"]):
         merged["network"] = previous["network"]
-    if new["attachment"]["kind"] is None:
+    if not _attachment_complete(new["attachment"]):
         merged["attachment"] = previous["attachment"]
     return merged
