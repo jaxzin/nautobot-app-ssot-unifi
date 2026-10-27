@@ -216,18 +216,22 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
             content_type = "application/json"
 
             async def read(self):
+                """Return the synthetic body."""
                 return body
 
             def __repr__(self):
+                """Mimic a response repr that exposes a session cookie."""
                 return "<Response Set-Cookie: TOKEN=synthetic-secret>"
 
         class Exchange:
             """Async context manager returned by session.request."""
 
             async def __aenter__(self):
+                """Open the synthetic response."""
                 return Response()
 
             async def __aexit__(self, *exc):
+                """Close without suppressing errors."""
                 return False
 
         records = []
