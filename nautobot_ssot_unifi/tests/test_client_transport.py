@@ -202,6 +202,54 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         finally:
             await client.logout()
 
+    async def test_debug_transport_logging_never_records_credentials_or_raw_bodies(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        body = json.dumps(
+            {"meta": {"rc": "ok"}, "data": [{"_id": "wlan-a", "name": "SSID", "x_passphrase": "synthetic-secret"}]}
+        ).encode()
+
+        class Response:  # pylint: disable=too-few-public-methods
+            """Minimal aiohttp response for the real aiounifi Connectivity path."""
+
+            status = 200
+            content_type = "application/json"
+
+            async def read(self):
+                return body
+
+            def __repr__(self):
+                return "<Response Set-Cookie: TOKEN=synthetic-secret>"
+
+        class Exchange:
+            """Async context manager returned by session.request."""
+
+            async def __aenter__(self):
+                return Response()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        records = []
+        handler = logging.Handler(logging.DEBUG)
+        handler.emit = lambda record: records.append(record.getMessage())
+        aiounifi = logging.getLogger("aiounifi")
+        previous = aiounifi.level
+        aiounifi.addHandler(handler)
+        aiounifi.setLevel(logging.DEBUG)
+        try:
+            with patch.object(client.config.session, "request", lambda *args, **kwargs: Exchange()):
+                await client.api.connectivity._request(
+                    "post", "https://controller.example/api/login", {"password": "synthetic-secret"}
+                )
+                rows = await client._get_wireless_configuration()
+            self.assertEqual(rows, [{"_id": "wlan-a", "name": "SSID"}])
+            self.assertFalse([message for message in records if "synthetic-secret" in message])
+        finally:
+            aiounifi.removeHandler(handler)
+            aiounifi.setLevel(previous)
+            await client.logout()
+
     async def test_error_status_report_fails_through_the_sdk_instead_of_looking_empty(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         client.logged_in = True

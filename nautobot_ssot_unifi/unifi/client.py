@@ -20,7 +20,8 @@ def _drop_transport_debug(record):
 
     aiounifi's Connectivity logs at DEBUG the login JSON (including the password),
     response objects with session cookies, and complete raw response bodies
-    before this client can project them. Warnings and errors still pass.
+    (including WLAN passphrases) before this client can project them. Warnings and
+    errors still pass.
     """
     return record.levelno > logging.DEBUG
 
@@ -188,8 +189,8 @@ class Client:
     async def _get_wireless_configuration(self):
         """GET only `/rest/wlanconf`; keep listed SSID facts and drop passphrases on receipt.
 
-        The response also carries pre-shared keys and RADIUS secrets. Nothing but the
-        projection below leaves this method, so no secret reaches a cache, log or diff.
+        The response also carries pre-shared keys and RADIUS secrets. Only the projection
+        below leaves this method; `_drop_transport_debug` keeps the raw body out of logs.
         """
         fields = {
             "_id",
