@@ -1,6 +1,7 @@
 """The unifi client definition for SSoT."""
 
 from typing import Iterable, TYPE_CHECKING
+import logging
 import ssl
 
 import aiohttp
@@ -12,6 +13,19 @@ from aiounifi.models.api import ApiRequest
 
 if TYPE_CHECKING:
     from aiounifi.models.site import Site
+
+
+def _drop_transport_debug(record):
+    """Keep aiounifi transport payloads out of every log destination.
+
+    aiounifi's Connectivity logs at DEBUG the login JSON (including the password),
+    response objects with session cookies, and complete raw response bodies
+    before this client can project them. Warnings and errors still pass.
+    """
+    return record.levelno > logging.DEBUG
+
+
+logging.getLogger("aiounifi.interfaces.connectivity").addFilter(_drop_transport_debug)
 
 
 def require_login(method):
