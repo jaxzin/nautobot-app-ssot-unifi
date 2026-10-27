@@ -4,7 +4,16 @@ import json
 import re
 from nautobot_ssot_unifi.ssot._bindings import _source_key, _text
 
-_KINDS = {"firmware", "vlan", "vlan-membership", "neighbor", "network_prefix", "ip_address_range"}
+_KINDS = {
+    "firmware",
+    "vlan",
+    "vlan-membership",
+    "neighbor",
+    "network_prefix",
+    "ip_address_range",
+    "wireless-network",
+    "wireless-assignment",
+}
 _REASONS = {
     "missing-platform",
     "missing-version",
@@ -21,6 +30,11 @@ _REASONS = {
     "incomplete-neighbor-evidence",
     "invalid-network",
     "invalid-dhcp-range",
+    "invalid-wireless",
+    "duplicate-wireless",
+    "unsupported-security",
+    "unsupported-scope",
+    "unresolved-network",
 }
 _UNSAFE = re.compile(
     r"secret|password|passwd|token|credential|authorization|bearer|cookie|private.?key|"

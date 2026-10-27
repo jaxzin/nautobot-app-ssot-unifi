@@ -12,8 +12,16 @@ _CLAIM_PATHS = {
     "vlan": frozenset({"name", "vid", "vlan_group", "status"}),
     "prefix": frozenset({"namespace", "network", "prefix_length", "type", "vlan"}),
     "ipaddressrange": frozenset({"name", "start_host", "end_host", "parent"}),
+    "wirelessnetwork": frozenset({"name", "ssid", "mode", "enabled", "authentication", "hidden"}),
 }
-_APP_LABELS = {"device": "dcim", "interface": "dcim", "vlan": "ipam", "prefix": "ipam", "ipaddressrange": "ipam"}
+_APP_LABELS = {
+    "device": "dcim",
+    "interface": "dcim",
+    "vlan": "ipam",
+    "prefix": "ipam",
+    "ipaddressrange": "ipam",
+    "wirelessnetwork": "wireless",
+}
 
 
 def _text(value):
@@ -207,6 +215,7 @@ class _BindingSession:
     def _model(kind):
         from nautobot.dcim.models import Device, Interface
         from nautobot.ipam.models import VLAN, Prefix, IPAddressRange
+        from nautobot.wireless.models import WirelessNetwork
 
         return {
             "device": Device,
@@ -214,6 +223,7 @@ class _BindingSession:
             "vlan": VLAN,
             "prefix": Prefix,
             "ipaddressrange": IPAddressRange,
+            "wirelessnetwork": WirelessNetwork,
         }[kind]
 
     def targets(self, kind):

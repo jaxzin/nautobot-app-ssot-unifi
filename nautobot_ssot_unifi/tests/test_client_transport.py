@@ -165,11 +165,48 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         finally:
             await client.logout()
 
+    async def test_wireless_channel_is_get_only_and_drops_passphrases_on_receipt(self):
+        client = Client(host="controller.example", username="reader", password="test-only")
+        client.logged_in = True
+        requests = []
+        facts = {
+            "_id": "wlan-a",
+            "name": "Synthetic SSID",
+            "enabled": True,
+            "hide_ssid": False,
+            "security": "wpapsk",
+            "wpa_mode": "wpa2",
+            "wpa3_support": True,
+            "wpa3_transition": True,
+            "wpa3_enhanced_192": False,
+            "networkconf_id": "net-a",
+            "ap_group_mode": "all",
+        }
+
+        async def response(request):
+            requests.append((request.method, request.path, request.data))
+            secrets = {
+                "x_passphrase": "synthetic-secret",
+                "x_iapp_key": "synthetic-secret",
+                "private_preshared_keys": [{"password": "synthetic-secret"}],
+                "radius_profile_id": "discard",
+            }
+            return {"data": [{**facts, **secrets}]}
+
+        try:
+            with patch.object(client.api, "request", response):
+                rows = await client._get_wireless_configuration()
+            self.assertEqual(requests, [("get", "/rest/wlanconf", None)])
+            self.assertEqual(rows, [facts])
+            self.assertNotIn("synthetic-secret", repr(rows))
+        finally:
+            await client.logout()
+
     async def test_debug_transport_logging_never_records_credentials_or_raw_bodies(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         client.logged_in = True
         body = json.dumps(
-            {"meta": {"rc": "ok"}, "data": [{"_id": "net-a", "name": "LAN", "x_secret": "synthetic-secret"}]}
+            {"meta": {"rc": "ok"}, "data": [{"_id": "wlan-a", "name": "SSID", "x_passphrase": "synthetic-secret"}]}
         ).encode()
 
         class Response:  # pylint: disable=too-few-public-methods
@@ -209,8 +246,8 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
                 await client.api.connectivity._request(
                     "post", "https://controller.example/api/login", {"password": "synthetic-secret"}
                 )
-                networks, _profiles = await client._get_vlan_configuration()
-            self.assertEqual(networks, [{"_id": "net-a", "name": "LAN"}])
+                rows = await client._get_wireless_configuration()
+            self.assertEqual(rows, [{"_id": "wlan-a", "name": "SSID"}])
             self.assertFalse([message for message in records if "synthetic-secret" in message])
         finally:
             aiounifi.removeHandler(handler)

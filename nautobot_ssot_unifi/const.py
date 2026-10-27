@@ -44,6 +44,10 @@ UNIFI_MAP = {
 
 UNIFI_SSOT_TAG = "unifi-ssot"
 
+# Connector-owned child of the "default" group holding only access points, so
+# wireless network assignments never claim that switches or gateways broadcast.
+UNIFI_AP_GROUP = "access-points"
+
 UNIFI_SSOT_INTERFACE_TYPES = {
     "ge": InterfaceTypeChoices.TYPE_1GE_FIXED,
     "2p5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,

@@ -20,7 +20,8 @@ def _drop_transport_debug(record):
 
     aiounifi's Connectivity logs at DEBUG the login JSON (including the password),
     response objects with session cookies, and complete raw response bodies
-    before this client can project them. Warnings and errors still pass.
+    (including WLAN passphrases) before this client can project them. Warnings and
+    errors still pass.
     """
     return record.levelno > logging.DEBUG
 
@@ -182,4 +183,30 @@ class Client:
         rows = response.get("data")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("Invalid UniFi client channel.")
+        return [{key: row[key] for key in fields if key in row} for row in rows]
+
+    @require_login
+    async def _get_wireless_configuration(self):
+        """GET only `/rest/wlanconf`; keep listed SSID facts and drop passphrases on receipt.
+
+        The response also carries pre-shared keys and RADIUS secrets. Only the projection
+        below leaves this method; `_drop_transport_debug` keeps the raw body out of logs.
+        """
+        fields = {
+            "_id",
+            "name",
+            "enabled",
+            "hide_ssid",
+            "security",
+            "wpa_mode",
+            "wpa3_support",
+            "wpa3_transition",
+            "wpa3_enhanced_192",
+            "networkconf_id",
+            "ap_group_mode",
+        }
+        response = await self.api.request(ApiRequest(method="get", path="/rest/wlanconf"))
+        rows = response.get("data")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Invalid UniFi wireless channel.")
         return [{key: row[key] for key in fields if key in row} for row in rows]

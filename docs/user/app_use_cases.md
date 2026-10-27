@@ -1,8 +1,9 @@
-# Import firmware, VLANs, and neighbors
+# Import firmware, VLANs, neighbors, and wireless networks
 
 Use **Unifi to Nautobot** to populate reported firmware, site-scoped VLANs,
-configured subnets and DHCP pools, interface membership, and last-known neighbor relationships. This reference
-applies to Nautobot 3.2.4 with SSoT 4.6.1. UniFi remains read-only.
+configured subnets and DHCP pools, interface membership, last-known neighbor
+relationships, and configured wireless networks. This reference applies to
+Nautobot 3.2.4 with SSoT 4.6.1. UniFi remains read-only.
 
 ## Prepare the inventory
 
@@ -13,7 +14,7 @@ MetadataType separately.
 
 | Prerequisite | Native definition |
 | --- | --- |
-| UniFi inventory ownership | JSON MetadataType on Device, Interface, VLAN, Prefix, and IP Address Range |
+| UniFi inventory ownership | JSON MetadataType on Device, Interface, VLAN, Prefix, IP Address Range, and Wireless Network |
 | UniFi neighbor observations | JSON MetadataType on Interface |
 | Last-known UniFi neighbors | Relationship with key `unifi_observed_neighbor`, type `symmetric-many-to-many`, and both endpoints `dcim.interface` |
 | UniFi client observations | JSON MetadataType on Interface and VMInterface |
@@ -22,6 +23,7 @@ MetadataType separately.
 | VM client attachment | Relationship key `unifi_observed_vm_client_attachment`, `one-to-many`, source `dcim.interface`, destination `virtualization.vminterface` |
 | Neighbor labels | Relationship, source, and destination label `Last-known UniFi neighbors`; neither side required |
 | Firmware dependency | Existing Platform and an Active status applicable to SoftwareVersion |
+| UniFi source authentication | JSON MetadataType on Wireless Network (required by `sync_wireless`) |
 | VLAN scope | One existing VLANGroup per included UniFi site |
 
 Device bindings use the immutable source device ID. Interface bindings use the
@@ -64,6 +66,7 @@ of a matching subnet or address span.
 | `sync_vlans` | `false` | Import VLANs, configured IPv4 subnets, explicit DHCP pools, and independently verified Interface membership fields |
 | `sync_neighbors` | `false` | Import exactly resolved last-known managed-interface neighbors |
 | `sync_clients` | `false` | Observe each client's reported network and switch-port or AP attachment on its matched interface; requires `sync_vlans` |
+| `sync_wireless` | `false` | Import configured wireless networks, their VLANs, and the access-point group; requires `sync_vlans` |
 | `vlan_groups` | `null` | Bind immutable source site IDs to existing native VLANGroup UUIDs |
 
 For example, enable VLAN ingestion for one included site with this Job data:
@@ -248,6 +251,57 @@ A report containing a row without a valid MAC fails the collection, because an
 unidentifiable row cannot show that an earlier client disappeared. SSoT does not wrap a sync in one transaction: each client write is
 atomic, and a run that stops midway leaves both records for the next run.
 
+## Import configured wireless networks
+
+`sync_wireless` (default `false`, requires `sync_vlans`) reads each site's
+wireless configuration with a GET-only request. The response also carries
+pre-shared keys and RADIUS secrets; the connector keeps only the listed fields
+below and discards the rest on receipt, so no secret reaches a cache, log, diff,
+or metadata record. `WirelessNetwork.secrets_group` is never set.
+
+| Source fact | Native record |
+| --- | --- |
+| WLAN `_id` | Binding in the **UniFi inventory ownership** document |
+| `name` | `WirelessNetwork.ssid`; `name` is `<controller>/<site>/<ssid>` |
+| `enabled`, `hide_ssid` | `enabled`, `hidden` |
+| Security fields | `authentication` (table below) |
+| `networkconf_id` | VLAN on the access-point group assignment |
+
+`WirelessNetwork.name` is unique across Nautobot, so the connector generates it
+from the controller, the Nautobot site name, and the SSID. Identity is the
+source WLAN ID: renaming the controller, site, or SSID renames the same record.
+A rename onto a name held by any other record is held as `identity-conflict`;
+an existing record with the generated name is never adopted. `mode` is always
+`Central`, a fixed modeling choice: UniFi reports no equivalent field.
+
+| UniFi `security`, `wpa_mode`, WPA3 flags | `authentication` |
+| --- | --- |
+| `open`, WPA3 off | Open |
+| `wpapsk`, `wpa2`, WPA3 off | WPA2 Personal |
+| `wpapsk`, `wpa2`, WPA3 support and transition on | WPA3 Personal, with source facts recorded |
+| `wpaeap`, `wpa2`, WPA3 off | WPA2 Enterprise |
+| `wpaeap`, `wpa2`, WPA3 support and transition on | WPA3 Enterprise, with source facts recorded |
+
+Nautobot 3.2.4 has no WPA2/WPA3 transition choice. A transition network
+therefore takes its WPA3 choice, and the source `security`, `wpa_mode`, and
+WPA3 flags are stored in **UniFi source authentication** metadata scoped to the
+`authentication` field. The record is removed when the network stops using a
+transition mode. Any other combination, including WPA3-only networks, is held
+as `unsupported-security`.
+
+Every Access Point moves into the connector-owned **access-points** group, a
+wireless-capable child of **default**, so an SSID assignment never claims that a
+switch or gateway broadcasts it. A wireless network broadcast by all APs
+(`ap_group_mode` `all`) on a single-site controller is assigned to that group
+with its network's VLAN. AP-group scoping, or a controller with several sites,
+is held as `unsupported-scope`: one controller-wide group cannot express a
+subset of APs without proven disjoint membership. A network whose VLAN is not
+imported is held as `unresolved-network`.
+
+A held network or assignment keeps its last-known record. A network omitted
+from a complete report is retained. Turning `sync_wireless` off keeps APs in
+the access-points group and leaves wireless records unchanged.
+
 ## Resolve held records and failures
 
 **unifi-held.json** contains only `schema_version: 1` and a `held` array of
@@ -266,6 +320,10 @@ JobResult/FileProxy permissions.
 | `invalid-dhcp-range` | Verify explicit IPv4 start/end addresses are ordered and contained within the configured subnet |
 | `unresolved-endpoint`, `unsupported-endpoint` | Verify explicit source Device and port identities; only Ethernet neighbors are supported |
 | `incomplete-neighbor-evidence` | Verify source timing and applicable channel completeness; do not treat missing fields as an empty report |
+| `invalid-wireless`, `duplicate-wireless` | Give each SSID on a site a unique name and complete `enabled`/`hide_ssid` facts |
+| `unsupported-security` | Use a security mode from the mapping table, or extend the mapping with reviewed source evidence |
+| `unsupported-scope` | Broadcast from all APs on a single-site controller, or leave the assignment for manual review |
+| `unresolved-network` | Resolve the SSID's network VLAN hold first; the assignment follows |
 
 A required collection request failure prevents inventory writes for that source
 run. Destination failures fail the Job but retain already committed independent
