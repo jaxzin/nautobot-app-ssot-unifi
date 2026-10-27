@@ -20,16 +20,23 @@ from nautobot.ipam.models import IPAddress
 from nautobot_ssot.contrib import NautobotAdapter
 from structlog import BoundLogger
 
-from nautobot_ssot_unifi.const import UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
+from nautobot_ssot_unifi.const import UNIFI_AP_GROUP, UNIFI_MAP, UNIFI_SSOT_INTERFACE_TYPES
 from nautobot_ssot_unifi.ssot import models
 from nautobot_ssot_unifi.ssot._ipam import _NetworkPrefixModel, _IPAddressRangeModel, _project_network_graph
 from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
 from nautobot_ssot_unifi.ssot.interfaces import _interface_records
-from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _BindingSession, _interface_id, _management_id
+from nautobot_ssot_unifi.ssot._bindings import (
+    _BindingHold,
+    _BindingSession,
+    _CLAIM_PATHS,
+    _interface_id,
+    _management_id,
+)
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership_fields, _VlanHold, _wan_without_vlan
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
+from nautobot_ssot_unifi.ssot._wireless import _read_source_authentication, _wireless_rows
 from nautobot_ssot_unifi.ssot._clients import (
     _MAC as _CLIENT_MAC,
     _ClientHold,
@@ -97,6 +104,19 @@ class UnifiAdapterMixin:
             self.vm_client_observation = models.VMClientObservationModel
             self.unresolved_clients = models.UnresolvedClientsModel
             self.top_level = self.top_level + ("client_observation", "vm_client_observation", "unresolved_clients")
+        self.sync_wireless = getattr(job, "sync_wireless", False) is True
+        if self.sync_wireless:
+            self.wireless_device_group = models.WirelessDeviceGroupModel
+            self.wireless_network = models.WirelessNetworkModel
+            self.wireless_assignment = models.WirelessAssignmentModel
+            index = self.top_level.index("device_group") + 1
+            # The access-point group must exist before devices move into it.
+            self.top_level = (
+                self.top_level[:index]
+                + ("wireless_device_group",)
+                + self.top_level[index:]
+                + ("wireless_network", "wireless_assignment")
+            )
 
 
 class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
@@ -125,6 +145,11 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
             return
         if diffsync_model._modelname == "unresolved_clients":
             for obj in diffsync_model._get_queryset().filter(pk=self.job._unifi_bindings.integration_id):
+                self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        if diffsync_model._modelname == "wireless_assignment":
+            targets = self.job._unifi_bindings.targets("wirelessnetwork")
+            for obj in diffsync_model._get_queryset().filter(wireless_network_id__in=targets):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
             return
         if diffsync_model._modelname == "neighbor":
@@ -164,6 +189,12 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
             return
         return super()._load_objects(diffsync_model)
+
+    def _handle_single_parameter(self, parameters, parameter_name, database_object, diffsync_model):
+        if parameter_name == "unifi_source_authentication":
+            parameters[parameter_name] = _read_source_authentication(database_object)
+            return
+        super()._handle_single_parameter(parameters, parameter_name, database_object, diffsync_model)
 
     def sync_complete(
         self,
@@ -259,6 +290,72 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             from nautobot_ssot_unifi.ssot._clients import _prerequisites as _client_prerequisites
 
             _client_prerequisites()
+        if self.sync_wireless:
+            from nautobot_ssot_unifi.ssot._wireless import _prerequisites as _wireless_prerequisites
+
+            _wireless_prerequisites()
+
+    @sync_to_async
+    def _retained_ap_group(self, device_id):
+        """Keep an AP in the access-point group when wireless sync is not enabled for this run."""
+        return Device.objects.filter(
+            pk=device_id,
+            controller_managed_device_group__name=UNIFI_AP_GROUP,
+            controller_managed_device_group__controller__name=self.controller_name,
+        ).exists()
+
+    @sync_to_async
+    def _load_wireless(self, site_id, site_name, raw_rows, networks, single_site):
+        from nautobot.wireless.choices import WirelessNetworkModeChoices
+        from nautobot.wireless.models import WirelessNetwork
+
+        session = self.job._unifi_bindings
+        rows, held = _wireless_rows(raw_rows, self.controller_name, site_name, networks, single_site)
+        self._held.extend(
+            {"kind": kind, "site_id": site_id, "source_id": source_id, "reason": reason}
+            for source_id, kind, reason in held
+        )
+        paths = _CLAIM_PATHS["wirelessnetwork"]
+        for row in rows:
+            try:
+                target_id = session.plan("wirelessnetwork", site_id, row["source_id"], {"name": row["name"]})
+                if WirelessNetwork.objects.filter(name=row["name"]).exclude(pk=target_id).exists():
+                    # Names are globally unique; a rename onto another record is never a merge.
+                    raise _BindingHold("identity-conflict")
+                _claim_available(target_id, session.integration_id, model=WirelessNetwork, paths=paths)
+            except _BindingHold as error:
+                self._held.append(
+                    {
+                        "kind": "wireless-network",
+                        "site_id": site_id,
+                        "source_id": row["source_id"],
+                        "reason": error.reason,
+                    }
+                )
+                continue
+            document = session.documents[("wirelessnetwork", target_id)]
+            document["field_paths"] = sorted(paths)
+            self.add(
+                self.wireless_network(
+                    id=target_id,
+                    name=row["name"],
+                    ssid=row["ssid"],
+                    mode=WirelessNetworkModeChoices.CENTRAL,
+                    enabled=row["enabled"],
+                    authentication=row["authentication"],
+                    hidden=row["hidden"],
+                    unifi_ownership=document,
+                    unifi_source_authentication=row["source_authentication"],
+                )
+            )
+            if row["vlan_id"] is not None:
+                self.add(
+                    self.wireless_assignment(
+                        wireless_network__id=target_id,
+                        controller_managed_device_group__name=UNIFI_AP_GROUP,
+                        vlan__id=row["vlan_id"],
+                    )
+                )
 
     @sync_to_async
     def _target_id(self, kind, site_id, source_id, collision_lookup):
@@ -729,6 +826,14 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 controller__name=self.controller_name,
             )
         )
+        if self.sync_wireless:
+            self.add(
+                self.wireless_device_group(
+                    name=UNIFI_AP_GROUP,
+                    controller__name=self.controller_name,
+                    parent__name="default",
+                )
+            )
         self._collection_channel = "site-discovery"
         sites = list(await self.client.get_sites())
         if self.sync_vlans:
@@ -753,6 +858,10 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             site = self.site(name=site_name, location_type__name=location_type__name)
             await self._debug("Added site %s", site)
             self.add(site)
+            if self.sync_wireless:
+                self._collection_channel = "wireless-configuration"
+                wireless_rows = await self.client._get_wireless_configuration()
+                await self._load_wireless(site_id, site.name, wireless_rows, networks, len(sites) == 1)
 
             self._collection_channel = "managed-devices"
             devices = list(await self.client.get_devices())
@@ -787,11 +896,13 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 _, created = self.get_or_add_model_instance(device_type)
                 if created:
                     await self._debug("Added device type %s", device_type)
-
+                group_name = "default"
+                if unifi_type == "uap" and (self.sync_wireless or await self._retained_ap_group(device_id)):
+                    group_name = UNIFI_AP_GROUP
                 device = self.device(
                     id=device_id,
                     name=unifi_device.name,
-                    controller_managed_device_group__name="default",
+                    controller_managed_device_group__name=group_name,
                     controller_managed_device_group__controller__name=self.job.controller.name,
                     location__name=site.name,
                     device_type__model=unifi_device.model,

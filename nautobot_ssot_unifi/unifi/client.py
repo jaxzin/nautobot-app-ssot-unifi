@@ -183,3 +183,29 @@ class Client:
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("Invalid UniFi client channel.")
         return [{key: row[key] for key in fields if key in row} for row in rows]
+
+    @require_login
+    async def _get_wireless_configuration(self):
+        """GET only `/rest/wlanconf`; keep listed SSID facts and drop passphrases on receipt.
+
+        The response also carries pre-shared keys and RADIUS secrets. Nothing but the
+        projection below leaves this method, so no secret reaches a cache, log or diff.
+        """
+        fields = {
+            "_id",
+            "name",
+            "enabled",
+            "hide_ssid",
+            "security",
+            "wpa_mode",
+            "wpa3_support",
+            "wpa3_transition",
+            "wpa3_enhanced_192",
+            "networkconf_id",
+            "ap_group_mode",
+        }
+        response = await self.api.request(ApiRequest(method="get", path="/rest/wlanconf"))
+        rows = response.get("data")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Invalid UniFi wireless channel.")
+        return [{key: row[key] for key in fields if key in row} for row in rows]

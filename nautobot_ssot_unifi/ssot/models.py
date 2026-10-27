@@ -13,9 +13,11 @@ from nautobot.virtualization.models import VMInterface
 from nautobot.dcim.models import DeviceType, Device, Location, ControllerManagedDeviceGroup, Interface, SoftwareVersion
 from nautobot.ipam.models import IPAddress, Prefix, IPAddressToInterface, VLAN
 from nautobot.ipam.choices import PrefixTypeChoices
+from nautobot.wireless.choices import WirelessNetworkModeChoices
+from nautobot.wireless.models import ControllerManagedDeviceGroupWirelessNetworkAssignment, WirelessNetwork
 
-from nautobot_ssot_unifi.const import UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
-from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _OWNERSHIP_TYPE, _physical_interface_id
+from nautobot_ssot_unifi.const import UNIFI_AP_GROUP, UNIFI_MANUFACTURER, UNIFI_SSOT_TAG
+from nautobot_ssot_unifi.ssot._bindings import _BindingHold, _CLAIM_PATHS, _OWNERSHIP_TYPE, _physical_interface_id
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot._neighbors import (
@@ -39,6 +41,7 @@ from nautobot_ssot_unifi.ssot._clients import (
     _RELATIONSHIP_KEY as _CLIENT_RELATIONSHIP_KEY,
     _VM_RELATIONSHIP_KEY as _VM_CLIENT_RELATIONSHIP_KEY,
 )
+from nautobot_ssot_unifi.ssot._wireless import _write_source_authentication
 
 if TYPE_CHECKING:
     from nautobot_ssot_unifi.ssot.adapters import UnifiNautobotAdapter
@@ -183,6 +186,14 @@ class _BoundModelMixin:
             or "software_version" in ownership.get("field_paths", [])
         ):
             _claim_available(target_id, adapter.job._unifi_bindings.integration_id, lock=True)
+        if cls._modelname == "wireless_network":
+            _claim_available(
+                target_id,
+                adapter.job._unifi_bindings.integration_id,
+                lock=True,
+                model=cls._model,
+                paths=_CLAIM_PATHS["wirelessnetwork"],
+            )
         if cls._modelname in {"interface", "vlan"}:
             paths = (
                 ("mode", "untagged_vlan", "tagged_vlans")
@@ -373,6 +384,39 @@ class DeviceGroupModel(UnifiModelMixin, NautobotModel):
     controller__name: str
     name: str
 
+    @classmethod
+    def get_queryset(cls):
+        """The access-point group has its own model, compared only when wireless sync is enabled."""
+        return super().get_queryset().exclude(name=UNIFI_AP_GROUP)
+
+
+class WirelessDeviceGroupModel(UnifiModelMixin, NautobotModel):
+    """Connector-owned access-point child of the default group."""
+
+    _model = ControllerManagedDeviceGroup
+    _modelname = "wireless_device_group"
+    _identifiers = ("controller__name", "name")
+    _attributes = ("parent__name",)
+
+    controller__name: str
+    name: str
+    parent__name: Optional[str] = None
+
+    @classmethod
+    def get_queryset(cls):
+        """Compare only the connector's access-point group."""
+        return super().get_queryset().filter(name=UNIFI_AP_GROUP)
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Mark a new group wireless-capable so Nautobot shows its wireless views."""
+        result = super().create(adapter, ids, attrs)
+        obj = cls._model.objects.get(**ids)
+        if not obj.capabilities:
+            obj.capabilities = ["wireless"]
+            obj.validated_save()
+        return result
+
 
 class InterfaceModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     """Native UUID identity, separate from the editable source label."""
@@ -469,6 +513,86 @@ class VLANModel(ActiveStatusMixin, _BoundModelMixin, NautobotModel):
     unifi_ownership: Annotated[
         dict[str, Any], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
     ]
+
+
+class WirelessNetworkModel(_BoundModelMixin, NautobotModel):
+    """A configured SSID, identified by its exact source binding rather than its generated name."""
+
+    _model = WirelessNetwork
+    _modelname = "wireless_network"
+    _binding_kind: ClassVar[str] = "wirelessnetwork"
+    _identifiers = ("id",)
+    _attributes = (
+        "name",
+        "ssid",
+        "mode",
+        "enabled",
+        "authentication",
+        "hidden",
+        "unifi_ownership",
+        "unifi_source_authentication",
+    )
+    id: uuid.UUID
+    name: str
+    ssid: str
+    mode: str = WirelessNetworkModeChoices.CENTRAL
+    enabled: bool
+    authentication: str
+    hidden: bool
+    unifi_ownership: Annotated[
+        dict[str, Any], ObjectMetadataAnnotation(metadata_type_name=_OWNERSHIP_TYPE, data_type="json")
+    ]
+    # Field-scoped connector metadata, read and written outside SSoT's whole-object annotation.
+    unifi_source_authentication: Optional[dict[str, Any]] = None
+
+    @classmethod
+    def _update_obj_with_parameters(cls, obj, parameters, adapter):
+        parameters = dict(parameters)
+        unset = object()
+        source_authentication = parameters.pop("unifi_source_authentication", unset)
+        super()._update_obj_with_parameters(obj, parameters, adapter)
+        if source_authentication is not unset:
+            _write_source_authentication(obj, source_authentication)
+
+
+class WirelessAssignmentModel(NautobotModel):
+    """Assignment of an owned SSID to the access-point group; ownership follows the SSID binding."""
+
+    _model = ControllerManagedDeviceGroupWirelessNetworkAssignment
+    _modelname = "wireless_assignment"
+    _identifiers = ("wireless_network__id", "controller_managed_device_group__name")
+    _attributes = ("vlan__id",)
+
+    wireless_network__id: uuid.UUID
+    controller_managed_device_group__name: str
+    vlan__id: Optional[uuid.UUID] = None
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        """Assign only an SSID whose exact binding is rechecked inside the write."""
+        session = adapter.job._unifi_bindings
+        try:
+            with transaction.atomic():
+                session.lock()
+                session.check("wirelessnetwork", ids["wireless_network__id"])
+                return super().create(adapter, ids, attrs)
+        except _BindingHold as error:
+            raise ObjectNotCreated(error.reason) from None
+
+    def update(self, attrs):
+        """Change the VLAN only while the SSID binding still belongs to this integration."""
+        session = self.adapter.job._unifi_bindings
+        try:
+            with transaction.atomic():
+                session.lock()
+                session.check("wirelessnetwork", self.wireless_network__id)
+                return super().update(attrs)
+        except _BindingHold as error:
+            raise ObjectNotUpdated(error.reason) from None
+
+    def delete(self):
+        """A missing or held assignment is retained, never removed automatically."""
+        raise ObjectNotDeleted("UniFi wireless assignments are retained.")
 
 
 class NeighborModel(NautobotModel):

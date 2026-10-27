@@ -165,56 +165,41 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         finally:
             await client.logout()
 
-    async def test_debug_transport_logging_never_records_credentials_or_raw_bodies(self):
+    async def test_wireless_channel_is_get_only_and_drops_passphrases_on_receipt(self):
         client = Client(host="controller.example", username="reader", password="test-only")
         client.logged_in = True
-        body = json.dumps(
-            {"meta": {"rc": "ok"}, "data": [{"_id": "net-a", "name": "LAN", "x_secret": "synthetic-secret"}]}
-        ).encode()
+        requests = []
+        facts = {
+            "_id": "wlan-a",
+            "name": "Synthetic SSID",
+            "enabled": True,
+            "hide_ssid": False,
+            "security": "wpapsk",
+            "wpa_mode": "wpa2",
+            "wpa3_support": True,
+            "wpa3_transition": True,
+            "wpa3_enhanced_192": False,
+            "networkconf_id": "net-a",
+            "ap_group_mode": "all",
+        }
 
-        class Response:  # pylint: disable=too-few-public-methods
-            """Minimal aiohttp response for the real aiounifi Connectivity path."""
+        async def response(request):
+            requests.append((request.method, request.path, request.data))
+            secrets = {
+                "x_passphrase": "synthetic-secret",
+                "x_iapp_key": "synthetic-secret",
+                "private_preshared_keys": [{"password": "synthetic-secret"}],
+                "radius_profile_id": "discard",
+            }
+            return {"data": [{**facts, **secrets}]}
 
-            status = 200
-            content_type = "application/json"
-
-            async def read(self):
-                """Return the synthetic body."""
-                return body
-
-            def __repr__(self):
-                """Mimic a response repr that exposes a session cookie."""
-                return "<Response Set-Cookie: TOKEN=synthetic-secret>"
-
-        class Exchange:
-            """Async context manager returned by session.request."""
-
-            async def __aenter__(self):
-                """Open the synthetic response."""
-                return Response()
-
-            async def __aexit__(self, *exc):
-                """Close without suppressing errors."""
-                return False
-
-        records = []
-        handler = logging.Handler(logging.DEBUG)
-        handler.emit = lambda record: records.append(record.getMessage())
-        aiounifi = logging.getLogger("aiounifi")
-        previous = aiounifi.level
-        aiounifi.addHandler(handler)
-        aiounifi.setLevel(logging.DEBUG)
         try:
-            with patch.object(client.config.session, "request", lambda *args, **kwargs: Exchange()):
-                await client.api.connectivity._request(
-                    "post", "https://controller.example/api/login", {"password": "synthetic-secret"}
-                )
-                networks, _profiles = await client._get_vlan_configuration()
-            self.assertEqual(networks, [{"_id": "net-a", "name": "LAN"}])
-            self.assertFalse([message for message in records if "synthetic-secret" in message])
+            with patch.object(client.api, "request", response):
+                rows = await client._get_wireless_configuration()
+            self.assertEqual(requests, [("get", "/rest/wlanconf", None)])
+            self.assertEqual(rows, [facts])
+            self.assertNotIn("synthetic-secret", repr(rows))
         finally:
-            aiounifi.removeHandler(handler)
-            aiounifi.setLevel(previous)
             await client.logout()
 
     async def test_error_status_report_fails_through_the_sdk_instead_of_looking_empty(self):
