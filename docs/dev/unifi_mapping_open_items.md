@@ -20,6 +20,7 @@ Connector coverage reviewed 2026-11-02 at `495184c268cbd987a4b31e01bf4e3ff8e2266
 | R10 | Is an Integration Wi-Fi broadcast `name` exactly the broadcast SSID? | `WirelessNetwork.ssid` from the Integration API. | The record has `name` and no separate SSID field. | Phase 0: compare with controller `wlanconf.name`. |
 | R11 | Which source evidence establishes a client address/network and, separately, authoritative non-use? | Positive native client-IP assignment; address retirement has a separate evidence gate. | Source client addresses exist but the current client reader drops them. The management-IP model guards both endpoints as UniFi-owned; client assignments must instead respect the established physical/VM client match. Active-client omission does not prove an address unused. | Prove positive address, network/prefix and identity facts for ingestion. Separately prove lease/assignment completeness before retirement. Use native SSoT writes/history and inventory status; do not invent a lifecycle field or broaden NIC ownership. Unknown retirement evidence does not invalidate a proven positive observation. |
 | R12 | Which source identity and endpoint establish a configured gateway address? | Gateway IPAddress and Interface assignment (coverage row 30). | `ip_subnet` contains the IPv4 host, but the current graph creates a Prefix and optional DHCP range only. | Prove network-to-Device/Interface identity, namespace and ownership; do not guess a VLAN subinterface or duplicate an address. |
+| R13 | Which fields establish a MAC for each managed port or radio? | Managed-interface MAC population (coverage row 32). | The current Interface model does not import MACs. Device/client MAC reads serve other identity/observation purposes. | Verify per-interface source fields and ownership before mapping; a device base MAC or neighbor client's MAC does not establish every port's address. |
 
 ## Dependencies by mapping
 
@@ -27,7 +28,7 @@ Research blocks only the scope that needs its answer. The table does not authori
 
 | Mapping scope | Research dependency | Can proceed without it |
 |---|---|---|
-| Existing single-site, all-AP wireless import | None of R1–R12 is a new prerequisite for its current supported path. | Preserve the implemented path and its documented holds. |
+| Existing single-site, all-AP wireless import | None of R1–R13 is a new prerequisite for its current supported path. | Preserve the implemented path and its documented holds. |
 | Filtered AP groups and multi-site broadcast assignment | R5; R1/R4/R10 as applicable if an Integration API channel is selected | Existing all-AP SSID/VLAN mapping |
 | Integration API wireless network/VLAN facts | R1, R2, R4, R10, as needed for the selected fields | Controller-API wireless mapping |
 | PoE fields | R6; R1/R4 for facts collected through the Integration API | Define the approved optional keys without inventing absent values. |
@@ -36,6 +37,7 @@ Research blocks only the scope that needs its answer. The table does not authori
 | Native client IPs and reservation lifecycle | R11; R1/R4 if their mapping needs the Integration API | Existing client network/attachment observations; D7 defines namespace policy. |
 | LAGs and switch stacks | R9; R1/R4 for an Integration API implementation | Existing independently identified interfaces |
 | Configured gateway addresses | R12; R1/R4 if using the Integration API | Existing configured IPv4 Prefix/DHCP range mapping |
+| Managed-interface MAC population | R13; R1/R4 if using the Integration API | Existing port identities and client MAC matching |
 | Firmware and neighbor commissioning | No new API research is required for the implemented mappings; D8 requires reviewed previews. | Strategy and preview review, without activating apply |
 | Hardware component templates | Exact model-library matching and curated-catalog ownership need a scoped implementation design; no new UniFi API dependency is established. | Existing model/part-number inventory |
 
