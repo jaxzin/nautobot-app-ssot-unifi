@@ -6,24 +6,44 @@ from os import path
 from urllib.parse import urlparse
 
 from django.core.exceptions import ValidationError
+from diffsync.enum import DiffSyncFlags
 
-from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
+from nautobot.apps.jobs import BooleanVar, Job, JSONVar, ObjectVar, register_jobs
 
 from nautobot.dcim.models import Controller, LocationType, Location
+from nautobot.ipam.models import Namespace
 from nautobot.extras.models import ExternalIntegration, SecretsGroup, SecretsGroupAssociation
 from nautobot.extras.choices import SecretsGroupAccessTypeChoices, SecretsGroupSecretTypeChoices
-
-from netutils.dns import fqdn_to_ip
 
 from nautobot_ssot.jobs.base import DataSource
 
 from nautobot_ssot_unifi.ssot import adapters
+from nautobot_ssot_unifi.ssot.address_scopes import AddressScopeResolver
+from nautobot_ssot_unifi.ssot._vlans import _group_bindings
+from nautobot_ssot_unifi.ssot._held import _publish_held
 
 name = "Unifi SSoT"  # pylint: disable=invalid-name
 
 
+# JSONVar subclasses customize one inherited field-construction hook.
+class _AddressScopesVar(JSONVar):  # pylint: disable=too-few-public-methods
+    """Preserve native empty JSON lists instead of treating them as omitted."""
+
+    def as_field(self):
+        """Keep empty collections available to the address-rule validator."""
+        field = super().as_field()
+        field.empty_values = (None, "")
+        return field
+
+
 class UnifiDataSource(DataSource, Job):
     """Unifi SSoT Data Source."""
+
+    def __init__(self):
+        """Retain last-known inventory when a source object disappears."""
+        super().__init__()
+        self.diffsync_flags |= DiffSyncFlags.SKIP_UNMATCHED_DST
+        self._unifi_collection_complete = False
 
     debug: bool = BooleanVar(description="Enable for more verbose debug logging", default=False)
     controller: Controller = ObjectVar(description="Unifi Controller to sync with", model=Controller)
@@ -35,6 +55,40 @@ class UnifiDataSource(DataSource, Job):
     default_location: Location = ObjectVar(
         description="Override the 'default' site with this location. If not specified, the controller's location will be used.",
         model=Location,
+        required=False,
+    )
+    namespace: Namespace = ObjectVar(
+        description="Namespace for imported networks and addresses. Defaults to the existing Global namespace.",
+        model=Namespace,
+        required=False,
+    )
+    address_scopes = _AddressScopesVar(
+        description="Optional address rules: each has prefixes (canonical CIDRs) and namespace_id (existing UUID). "
+        "Null uses Namespace; an empty list admits no IPs. Rules have no fallback.",
+        required=False,
+    )
+    sync_firmware = BooleanVar(
+        description="Import reported firmware using native SoftwareVersion records.", default=False
+    )
+    sync_vlans = BooleanVar(
+        description="Import site-scoped VLANs, configured IPv4 subnets/DHCP pools, and verified membership fields.",
+        default=False,
+    )
+    sync_neighbors = BooleanVar(
+        description="Import last-known interface neighbor observations, not physical cables.", default=False
+    )
+    sync_clients = BooleanVar(
+        description="Import last-known client network and switch-port/AP attachment observations. Requires sync_vlans "
+        "and the UniFi client observation schema.",
+        default=False,
+    )
+    sync_wireless = BooleanVar(
+        description="Import configured wireless networks (SSIDs), their VLANs, and the access-point group. "
+        "Requires sync_vlans and the UniFi wireless schema.",
+        default=False,
+    )
+    vlan_groups = JSONVar(
+        description="Optional entries with site_id and existing vlan_group_id UUID; one group per source site.",
         required=False,
     )
 
@@ -55,11 +109,7 @@ class UnifiDataSource(DataSource, Job):
         remote_url = controller.external_integration.remote_url
         url = urlparse(remote_url)
         if url.scheme not in ["http", "https"]:
-            raise ValidationError(
-                {
-                    "controller": f"Unifi SSoT requires either HTTP or HTTPS for the external integration, not {url.scheme} that is currently specified in the remote url {remote_url}"
-                }
-            )
+            raise ValidationError({"controller": "Unifi SSoT requires HTTP or HTTPS for the external integration."})
 
         try:
             secrets_group: SecretsGroup = controller.external_integration.secrets_group
@@ -98,28 +148,77 @@ class UnifiDataSource(DataSource, Job):
             controller_name=self.controller.name,
             default_location_type=default_location_type,
             default_location_name=default_location_name,
+            namespace_name=self.namespace.name,
+            address_scope_resolver=self.address_scope_resolver,
         )
         self.source_adapter.load(
-            host=fqdn_to_ip(url.hostname),
+            host=url.hostname,
             port=(url.port or 443),
             username=username,
             password=password,
             verify_cert=external_integration.verify_ssl,
             timeout=external_integration.timeout,
         )
+        self._unifi_collection_complete = True
 
     def load_target_adapter(self):
         """Load data from Nautobot into DiffSync models."""
         self.target_adapter = adapters.UnifiNautobotAdapter(job=self, sync=self.sync)
         self.target_adapter.load()
 
+    def execute_sync(self):
+        """Keep roll-forward work and derive Job failure from native SSoT history."""
+        super().execute_sync()
+        if self.sync.logs.filter(status__in=["failure", "error"]).exists():
+            self.fail("UniFi inventory sync has failed native writes; completed independent updates are retained.")
+
     def run(
-        self, dryrun, debug, controller, default_location, location_type, *args, **kwargs
-    ):  # pylint: disable=arguments-differ,too-many-arguments,attribute-defined-outside-init
+        self,
+        dryrun,
+        debug,
+        controller,
+        default_location,
+        location_type,
+        *args,
+        namespace=None,
+        address_scopes=None,
+        sync_firmware=False,
+        sync_vlans=False,
+        sync_neighbors=False,
+        vlan_groups=None,
+        sync_clients=False,
+        sync_wireless=False,
+        **kwargs,
+    ):  # pylint: disable=arguments-differ,too-many-arguments,too-many-locals,attribute-defined-outside-init
         """Perform data synchronization."""
         self.dryrun = dryrun
         self.debug = debug
         self.controller = controller
+        self._unifi_collection_complete = False
+        for flag_name, flag in (
+            ("sync_firmware", sync_firmware),
+            ("sync_vlans", sync_vlans),
+            ("sync_neighbors", sync_neighbors),
+        ):
+            if not isinstance(flag, bool):
+                raise ValidationError({flag_name: "Must be a boolean."})
+        self.sync_firmware = sync_firmware
+        self.sync_vlans = sync_vlans
+        self.sync_neighbors = sync_neighbors
+        if not isinstance(sync_clients, bool):
+            raise ValidationError({"sync_clients": "Must be a boolean."})
+        if sync_clients and not sync_vlans:
+            raise ValidationError({"sync_clients": "Requires sync_vlans for the network facts clients report."})
+        self.sync_clients = sync_clients
+        if not isinstance(sync_wireless, bool):
+            raise ValidationError({"sync_wireless": "Must be a boolean."})
+        if sync_wireless and not sync_vlans:
+            raise ValidationError({"sync_wireless": "Requires sync_vlans for the networks SSIDs carry."})
+        self.sync_wireless = sync_wireless
+        self.vlan_groups = vlan_groups
+        self._unifi_vlan_groups = _group_bindings(vlan_groups) if sync_vlans else {}
+        self.namespace = namespace if namespace is not None else Namespace.objects.get(name="Global")
+        self.address_scope_resolver = AddressScopeResolver(address_scopes, self.namespace.name)
         self.default_location = default_location or controller.location
         self.default_location_type = location_type or self.default_location.location_type
         self.hardware_models = {}
@@ -132,7 +231,11 @@ class UnifiDataSource(DataSource, Job):
             for record in reader:
                 self.hardware_models[record["model"]] = record
 
-        super().run(dryrun=self.dryrun, *args, **kwargs)
+        try:
+            super().run(dryrun=self.dryrun, *args, **kwargs)
+        finally:
+            if getattr(self, "source_adapter", None) is not None:
+                _publish_held(self)
 
 
 register_jobs(UnifiDataSource)

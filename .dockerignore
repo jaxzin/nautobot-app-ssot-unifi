@@ -19,6 +19,8 @@ FAQ.md
 .git/
 .gitignore
 .github
+.superpowers/
+.runtime/
 tasks.py
 LICENSE
 **/*.log
