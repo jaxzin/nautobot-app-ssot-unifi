@@ -287,7 +287,7 @@ class _ClientIPModel(NautobotModel):
                 Namespace.objects.select_for_update().get(pk=desired["namespace_id"])
                 interface = self._model.objects.select_for_update().get(pk=self.id)
                 parent = interface.parent
-                type(parent).objects.select_for_update().get(pk=parent.pk)
+                parent.refresh_from_db(fields=["primary_ip4"], from_queryset=type(parent).objects.select_for_update())
                 self._validate_client(proof)
                 prefix = _prefix(desired, proof["vlan_id"])
                 state = _inspect(interface, proof, desired, lock=True)

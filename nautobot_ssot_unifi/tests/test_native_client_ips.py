@@ -162,6 +162,18 @@ class NativeClientIPTests(TestCase):
         self.assertFalse(IPAddress.objects.filter(host=NEW, parent__namespace=self.a).exists())
         self.assertIn("foreign-owner", [row["reason"] for row in source._held])
 
+    def test_apply_retains_link_if_device_primary_changes_after_projection(self):
+        self.sync(self.source([clients.wired(ip=OLD)]))
+        link = self.client_nic.ip_address_assignments.get()
+        source = self.source([clients.wired(ip=NEW, seen=1760000001)])
+        device = self.client_nic.device
+        device.primary_ip4 = link.ip_address
+        device.validated_save()
+        with self.assertRaises(ObjectNotUpdated):
+            self.sync(source)
+        self.assertTrue(IPAddressToInterface.objects.filter(pk=link.pk).exists())
+        self.assertFalse(IPAddress.objects.filter(host=NEW, parent__namespace=self.a).exists())
+
     def test_other_endpoint_assignment_is_a_hold(self):
         address = IPAddress(address=f"{OLD}/24", parent=self.prefix, status=self.status)
         address.validated_save()
