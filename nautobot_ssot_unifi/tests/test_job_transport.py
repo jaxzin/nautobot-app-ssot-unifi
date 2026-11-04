@@ -46,6 +46,20 @@ class JobTransportTests(TestCase):
         self.assertTrue(job.diffsync_flags & DiffSyncFlags.SKIP_UNMATCHED_DST)
         self.assertFalse(job.diffsync_flags & DiffSyncFlags.SKIP_UNMATCHED_SRC)
 
+    def test_client_ip_requires_client_and_vlan_sync(self):
+        job = UnifiDataSource()
+        with self.assertRaises(ValidationError) as error:
+            job.run(
+                dryrun=True,
+                debug=False,
+                controller=None,
+                default_location=None,
+                location_type=None,
+                sync_client_ips=True,
+                sync_vlans=True,
+            )
+        self.assertEqual(error.exception.message_dict, {"sync_client_ips": ["Requires sync_clients and sync_vlans."]})
+
     def test_controller_hostname_is_preserved_for_tls(self):
         job = UnifiDataSource()
         integration = SimpleNamespace(

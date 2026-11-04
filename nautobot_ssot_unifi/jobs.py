@@ -82,6 +82,11 @@ class UnifiDataSource(DataSource, Job):
         "and the UniFi client observation schema.",
         default=False,
     )
+    sync_client_ips = BooleanVar(
+        description="Import observed IPv4 addresses on matched client interfaces. Requires sync_clients, "
+        "sync_vlans, and the UniFi client IP assignments MetadataType.",
+        default=False,
+    )
     sync_wireless = BooleanVar(
         description="Import configured wireless networks (SSIDs), their VLANs, and the access-point group. "
         "Requires sync_vlans and the UniFi wireless schema.",
@@ -187,6 +192,7 @@ class UnifiDataSource(DataSource, Job):
         sync_neighbors=False,
         vlan_groups=None,
         sync_clients=False,
+        sync_client_ips=False,
         sync_wireless=False,
         **kwargs,
     ):  # pylint: disable=arguments-differ,too-many-arguments,too-many-locals,attribute-defined-outside-init
@@ -199,6 +205,7 @@ class UnifiDataSource(DataSource, Job):
             ("sync_firmware", sync_firmware),
             ("sync_vlans", sync_vlans),
             ("sync_neighbors", sync_neighbors),
+            ("sync_client_ips", sync_client_ips),
         ):
             if not isinstance(flag, bool):
                 raise ValidationError({flag_name: "Must be a boolean."})
@@ -210,6 +217,9 @@ class UnifiDataSource(DataSource, Job):
         if sync_clients and not sync_vlans:
             raise ValidationError({"sync_clients": "Requires sync_vlans for the network facts clients report."})
         self.sync_clients = sync_clients
+        if sync_client_ips and not (sync_clients and sync_vlans):
+            raise ValidationError({"sync_client_ips": "Requires sync_clients and sync_vlans."})
+        self.sync_client_ips = sync_client_ips
         if not isinstance(sync_wireless, bool):
             raise ValidationError({"sync_wireless": "Must be a boolean."})
         if sync_wireless and not sync_vlans:

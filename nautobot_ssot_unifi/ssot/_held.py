@@ -13,6 +13,7 @@ _KINDS = {
     "ip_address_range",
     "wireless-network",
     "wireless-assignment",
+    "client-ip",
 }
 _REASONS = {
     "missing-platform",
