@@ -158,7 +158,7 @@ class Client:
         return tuple(projections)
 
     @require_login
-    async def _get_client_configuration(self):
+    async def _get_client_configuration(self, *, include_ip=False):
         """GET only `/stat/sta`; keep association/network evidence, discard everything else.
 
         A fully parsed, successful report is the only basis for recording a client's
@@ -179,6 +179,8 @@ class Client:
             "last_seen",
             "site_id",
         }
+        if include_ip:
+            fields.add("ip")
         response = await self.api.request(ApiRequest(method="get", path="/stat/sta"))
         rows = response.get("data")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):

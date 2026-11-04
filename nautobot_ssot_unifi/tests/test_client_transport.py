@@ -158,8 +158,10 @@ class ClientTransportTests(IsolatedAsyncioTestCase):
         try:
             with patch.object(client.api, "request", response):
                 clients = await client._get_client_configuration()
-            self.assertEqual(requests, [("get", "/stat/sta", None)])
+                with_ips = await client._get_client_configuration(include_ip=True)
+            self.assertEqual(requests, [("get", "/stat/sta", None)] * 2)
             self.assertEqual(clients, [{"_id": "c1", "mac": "02:00:00:00:10:01", "network_id": "net-iot"}])
+            self.assertEqual(with_ips, [{**clients[0], "ip": "192.0.2.50"}])
             self.assertNotIn("synthetic-secret", repr(clients))
             self.assertNotIn("192.0.2.50", repr(clients))
         finally:

@@ -37,6 +37,13 @@ from nautobot_ssot_unifi.ssot._ownership import _claim_available
 from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership_fields, _VlanHold, _wan_without_vlan
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
 from nautobot_ssot_unifi.ssot._wireless import _read_source_authentication, _wireless_rows
+from nautobot_ssot_unifi.ssot._client_ips import (
+    _PhysicalClientIPModel,
+    _VirtualClientIPModel,
+    _facts as _client_ip_facts,
+    _prerequisites as _client_ip_prerequisites,
+    _project as _project_client_ips,
+)
 from nautobot_ssot_unifi.ssot._clients import (
     _MAC as _CLIENT_MAC,
     _ClientHold,
@@ -104,6 +111,11 @@ class UnifiAdapterMixin:
             self.vm_client_observation = models.VMClientObservationModel
             self.unresolved_clients = models.UnresolvedClientsModel
             self.top_level = self.top_level + ("client_observation", "vm_client_observation", "unresolved_clients")
+        self.sync_client_ips = getattr(job, "sync_client_ips", False) is True
+        if self.sync_client_ips:
+            self.client_ip = _PhysicalClientIPModel
+            self.vm_client_ip = _VirtualClientIPModel
+            self.top_level = self.top_level + ("client_ip", "vm_client_ip")
         self.sync_wireless = getattr(job, "sync_wireless", False) is True
         if self.sync_wireless:
             self.wireless_device_group = models.WirelessDeviceGroupModel
@@ -146,6 +158,11 @@ class UnifiNautobotAdapter(UnifiAdapterMixin, NautobotAdapter):
         if diffsync_model._modelname == "unresolved_clients":
             for obj in diffsync_model._get_queryset().filter(pk=self.job._unifi_bindings.integration_id):
                 self._load_single_object(obj, diffsync_model, diffsync_model.get_synced_attributes())
+            return
+        if diffsync_model._modelname in {"client_ip", "vm_client_ip"}:
+            for (kind, target), (_, current, _) in self.job._unifi_client_ip_plans.items():
+                if kind == diffsync_model._model._meta.model_name:
+                    self.add(diffsync_model(id=target, pk=target, address=current))
             return
         if diffsync_model._modelname == "wireless_assignment":
             targets = self.job._unifi_bindings.targets("wirelessnetwork")
@@ -266,6 +283,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         self.job._unifi_neighbor_proofs = {}
         self.job._unifi_client_proofs = {}
         self.job._unifi_client_retire = {}
+        self.job._unifi_client_ip_plans = {}
+        self._client_ip_candidates = []
         self._client_entries = []
         self._client_reported = {}
         self._network_prefix_keys = set()
@@ -290,6 +309,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             from nautobot_ssot_unifi.ssot._clients import _prerequisites as _client_prerequisites
 
             _client_prerequisites()
+        if self.sync_client_ips:
+            _client_ip_prerequisites()
         if self.sync_wireless:
             from nautobot_ssot_unifi.ssot._wireless import _prerequisites as _wireless_prerequisites
 
@@ -658,6 +679,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         for network in _networks(network_rows)[0]:
             if networks.get(network["source_id"]) is not None:
                 vids[network["source_id"]] = network["vid"]
+        source_networks = {row["_id"]: row for row in network_rows} if self.sync_client_ips else {}
         if any(not isinstance(row.get("mac"), str) or not _CLIENT_MAC.fullmatch(row["mac"]) for row in rows):
             # An unidentifiable row cannot establish that an earlier client disappeared.
             raise ValueError("Invalid UniFi client channel.")
@@ -694,6 +716,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                 self.job._unifi_client_proofs[target] = {"site_id": site_id, "kind": kind}
                 self.job._unifi_client_retire[(site_id, mac)] = (kind, target, document)
                 self.add(self._client_model(kind)(id=target, client_observations=document))
+                if self.sync_client_ips:
+                    self._collect_client_ip(kind, target, row, document, source_networks)
             except _ClientHold as error:
                 self._client_entries.append(
                     _client_entry(
@@ -701,10 +725,34 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     )
                 )
 
+    def _collect_client_ip(self, kind, target, row, document, networks):
+        network = document["network"]
+        network_id = network["source_network_id"]
+        try:
+            desired = _client_ip_facts(self.address_scope_resolver, row, networks[network_id])
+        except _ClientHold as error:
+            self._held.append({"kind": "client-ip", "source_id": str(target), "reason": error.reason})
+            return
+        if desired is not None:
+            proof = {
+                "kind": kind,
+                "integration_id": document["integration_id"],
+                "site_id": document["site_id"],
+                "client_mac": document["mac"],
+                "network_id": network_id,
+                "vlan_id": UUID(network["vlan_id"]),
+                "seen": _instant(document["last_seen_at"]),
+            }
+            self._client_ip_candidates.append(
+                (proof, target, desired, self.address_scope_resolver.resolve(desired["host"]))
+            )
+
     @sync_to_async
     def _finalize_clients(self):
         """Flip presence for omitted clients and publish the integration's unresolved record."""
         session = self.job._unifi_bindings
+        if self.sync_client_ips:
+            _project_client_ips(self)
         integration_id = session.integration_id
         collected = self._client_reported
         previous = _read_unresolved_clients(integration_id)
@@ -1017,7 +1065,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
 
             if self.sync_clients:
                 self._collection_channel = "client-associations"
-                client_rows = await self.client._get_client_configuration()
+                client_rows = await self.client._get_client_configuration(include_ip=self.sync_client_ips)
                 await self._load_clients(
                     site_id,
                     client_rows,

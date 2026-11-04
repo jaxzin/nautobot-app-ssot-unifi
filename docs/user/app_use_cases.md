@@ -18,6 +18,7 @@ MetadataType separately.
 | UniFi neighbor observations | JSON MetadataType on Interface |
 | Last-known UniFi neighbors | Relationship with key `unifi_observed_neighbor`, type `symmetric-many-to-many`, and both endpoints `dcim.interface` |
 | UniFi client observations | JSON MetadataType on Interface and VMInterface |
+| UniFi client IP assignments | JSON MetadataType on Interface and VMInterface; required for `sync_client_ips` |
 | UniFi unresolved client observations | JSON MetadataType on External Integration |
 | Client attachment | Relationship key `unifi_observed_client_attachment`, `one-to-many`, source `dcim.interface` (switch port or AP radio), destination `dcim.interface` (client) |
 | VM client attachment | Relationship key `unifi_observed_vm_client_attachment`, `one-to-many`, source `dcim.interface`, destination `virtualization.vminterface` |
@@ -66,6 +67,7 @@ of a matching subnet or address span.
 | `sync_vlans` | `false` | Import VLANs, configured IPv4 subnets, explicit DHCP pools, and independently verified Interface membership fields |
 | `sync_neighbors` | `false` | Import exactly resolved last-known managed-interface neighbors |
 | `sync_clients` | `false` | Observe each client's reported network and switch-port or AP attachment on its matched interface; requires `sync_vlans` |
+| `sync_client_ips` | `false` | Import observed IPv4 addresses onto matched client interfaces; requires `sync_clients` and `sync_vlans` |
 | `sync_wireless` | `false` | Import configured wireless networks, their VLANs, and the access-point group; requires `sync_vlans` |
 | `vlan_groups` | `null` | Bind immutable source site IDs to existing native VLANGroup UUIDs |
 
@@ -248,8 +250,32 @@ A client omitted from a complete report becomes `not-observed` and keeps its
 last facts and attachment. A failed or incomplete collection writes nothing. A
 report older than the stored `last_seen_at` is held as `incomplete-membership`.
 A report containing a row without a valid MAC fails the collection, because an
-unidentifiable row cannot show that an earlier client disappeared. SSoT does not wrap a sync in one transaction: each client write is
-atomic, and a run that stops midway leaves both records for the next run.
+unidentifiable row cannot show that an earlier client disappeared. Each client write is atomic. If the run stops midway,
+finished client writes remain in Nautobot.
+
+### Import client IPv4 addresses
+
+1. Provision the **UniFi client IP assignments** JSON MetadataType for both
+   Interface and VMInterface.
+2. Run a dry run with `sync_client_ips`, `sync_clients`, and `sync_vlans` enabled.
+   Check the proposed client IP changes and the `client-ip` holds in
+   `unifi-held.json`.
+3. Apply and open a matched interface's IP addresses in Nautobot. A subsequent
+   dry run with the same observations proposes no client IP changes.
+
+The client report supplies the IPv4 host. The reported network supplies its
+configured subnet, and the existing address scope rules supply its namespace.
+The connector uses the corresponding native Prefix and reuses a compatible
+IPAddress or assignment if one already exists. An IP address assigned to a
+different interface is held for review. An address change can remove only an
+assignment previously created by this integration, and only after the new
+assignment succeeds. Missing observations leave the last known assignment in
+place. IPAddress records and primary IP selections are retained.
+
+**UniFi client IP assignments** records the connector's assignment UUIDs in
+Object Metadata: `schema_version`, `integration_id`, `site_id`, `client_mac`,
+and `assignments` entries with `ip_address_id` and `assignment_id`.
+Existing links can be reused without adding them to this document.
 
 ## Import configured wireless networks
 
