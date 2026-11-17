@@ -291,7 +291,9 @@ class NativeVlanTests(TestCase):
     def test_discovered_unbound_site_rejects_collection_before_inventory_changes(self):
         source = self.source([], {})
         source.client = SimpleNamespace(
-            get_sites=AsyncMock(return_value=[SimpleNamespace(site_id="site-a"), SimpleNamespace(site_id="new-site")])
+            get_sites=AsyncMock(
+                return_value=[SimpleNamespace(site_id="site-a", raw={}), SimpleNamespace(site_id="new-site", raw={})]
+            )
         )
         self.job.controller = SimpleNamespace(name="contract-controller")
         before = ObjectMetadata.objects.count()

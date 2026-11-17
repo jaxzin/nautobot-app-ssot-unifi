@@ -211,6 +211,12 @@ class _BindingSession:
             if parent == device_id and discriminator == "ifname" and key[3] not in source_ids:
                 self._missing_os.add((site_id, device_id))
 
+    def site_ids(self):
+        """Return sites already recorded for this integration."""
+        return {
+            site_id for _, integration_id, site_id, _ in self.index._by_source if integration_id == self.integration_id
+        }
+
     @staticmethod
     def _model(kind):
         from nautobot.dcim.models import Device, Interface

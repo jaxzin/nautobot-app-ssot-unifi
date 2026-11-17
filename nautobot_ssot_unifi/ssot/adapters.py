@@ -34,7 +34,14 @@ from nautobot_ssot_unifi.ssot._bindings import (
 )
 from nautobot_ssot_unifi.ssot._firmware import _FirmwareHold, _version
 from nautobot_ssot_unifi.ssot._ownership import _claim_available
-from nautobot_ssot_unifi.ssot._vlans import _included_sites, _networks, _membership_fields, _VlanHold, _wan_without_vlan
+from nautobot_ssot_unifi.ssot._vlans import (
+    _included_sites,
+    _membership_fields,
+    _networks,
+    _site_scopes,
+    _VlanHold,
+    _wan_without_vlan,
+)
 from nautobot_ssot_unifi.ssot._neighbors import _NeighborHold, _evidence, _observation, _read_observation, _utc, _pair
 from nautobot_ssot_unifi.ssot._wireless import _read_source_authentication, _wireless_rows
 from nautobot_ssot_unifi.ssot._client_ips import (
@@ -669,7 +676,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         return self.client_observation if kind == "interface" else self.vm_client_observation
 
     @sync_to_async
-    def _load_clients(self, site_id, rows, networks, network_rows, devices, attach):
+    def _load_clients(self, site_id, rows, networks, network_rows, devices, attach, *, current_site_id):
         """Project one complete site report; nothing is written when collection raised before this."""
         from nautobot.dcim.models import Interface
         from nautobot.virtualization.models import VMInterface
@@ -683,7 +690,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         if any(not isinstance(row.get("mac"), str) or not _CLIENT_MAC.fullmatch(row["mac"]) for row in rows):
             # An unidentifiable row cannot establish that an earlier client disappeared.
             raise ValueError("Invalid UniFi client channel.")
-        if any(row.get("site_id") is not None and row["site_id"] != site_id for row in rows):
+        if any(row.get("site_id") not in (None, site_id, current_site_id) for row in rows):
             # Contradictory explicit site evidence makes the whole report untrustworthy for this
             # site: nothing is stored and no absence is inferred. A missing site_id is not rejected.
             raise ValueError("Invalid UniFi client channel.")
@@ -884,10 +891,14 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
             )
         self._collection_channel = "site-discovery"
         sites = list(await self.client.get_sites())
+        recorded_ids = self.job._unifi_bindings.site_ids()
         if self.sync_vlans:
-            _included_sites(self.job._unifi_vlan_groups, [site.site_id for site in sites])
+            recorded_ids.update(self.job._unifi_vlan_groups)
+        scopes = _site_scopes(sites, recorded_ids)
+        if self.sync_vlans:
+            _included_sites(self.job._unifi_vlan_groups, list(scopes.values()))
         for site in sites:
-            site_id = site.site_id
+            site_id = scopes[site.site_id]
             site_name = site.name
             self.client.current_site = site_name
             if self.sync_vlans:
@@ -1073,4 +1084,5 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     network_rows,
                     {device.raw["_id"]: device.raw for device in devices},
                     attach,
+                    current_site_id=site.site_id,
                 )
