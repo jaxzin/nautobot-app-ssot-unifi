@@ -1,6 +1,7 @@
 """Private presence-aware site/VLAN/membership projection."""
 
 from collections import Counter
+import re
 from uuid import UUID
 from django.core.exceptions import ValidationError
 from nautobot_ssot_unifi.ssot._bindings import _text
@@ -41,6 +42,34 @@ def _group_bindings(entries, *, existing=None):
 def _included_sites(bindings, sites):
     if len(sites) != len(set(sites)) or set(bindings) != set(sites):
         raise ValidationError({"vlan_groups": "Bindings must match every included source site exactly."})
+
+
+def _site_scopes(sites, recorded_ids):
+    """Map live site IDs to existing ownership scopes across a Network 11 upgrade."""
+    current_ids = [site.site_id for site in sites]
+    live_ids = set(current_ids)
+    error = ValidationError({"vlan_groups": "UniFi site identity evidence is ambiguous."})
+    if len(live_ids) != len(current_ids):
+        raise error
+
+    scopes = {}
+    for site in sites:
+        current = site.site_id
+        legacy = site.raw.get("legacy_id")
+        scope = current
+        if (
+            isinstance(legacy, str)
+            and re.fullmatch(r"[0-9a-f]{24}", legacy)
+            and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", current)
+            and legacy in recorded_ids
+        ):
+            if legacy in live_ids or current in recorded_ids:
+                raise error
+            scope = legacy
+        scopes[current] = scope
+    if len(set(scopes.values())) != len(scopes):
+        raise error
+    return scopes
 
 
 def _wan_without_vlan(row):

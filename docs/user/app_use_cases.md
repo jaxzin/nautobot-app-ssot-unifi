@@ -69,7 +69,7 @@ of a matching subnet or address span.
 | `sync_clients` | `false` | Observe each client's reported network and switch-port or AP attachment on its matched interface; requires `sync_vlans` |
 | `sync_client_ips` | `false` | Import observed IPv4 addresses onto matched client interfaces; requires `sync_clients` and `sync_vlans` |
 | `sync_wireless` | `false` | Import configured wireless networks, their VLANs, and the access-point group; requires `sync_vlans` |
-| `vlan_groups` | `null` | Bind immutable source site IDs to existing native VLANGroup UUIDs |
+| `vlan_groups` | `null` | Bind source site IDs to existing native VLANGroup UUIDs |
 
 For example, enable VLAN ingestion for one included site with this Job data:
 
@@ -89,6 +89,13 @@ Replace the example identities with your reviewed source site and native group.
 Every included site must have exactly one binding, and distinct sites cannot
 share a group. Static input errors fail before requests. Unknown or unbound
 sites fail after read-only site discovery and before inventory writes.
+
+When UniFi Network reports a new site UUID and its `legacy_id` matches a
+previously recorded site ID, the connector uses the live site and keeps the
+recorded ID for Nautobot bindings and observations. A new site uses its current
+ID. Conflicting identities stop collection before inventory writes. This
+reconciles site IDs only. Device and network bindings still require their
+own exact source identities.
 
 1. Run with **Dryrun** enabled and the desired feature inputs.
 2. Review the native SSoT diff and protected **unifi-held.json** artifact.
