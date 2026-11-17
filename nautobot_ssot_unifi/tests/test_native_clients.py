@@ -117,7 +117,7 @@ class NativeClientTests(TestCase):
         machine = VirtualMachine.objects.create(name="client-vm", cluster=cluster, status=self.status)
         return VMInterface.objects.create(virtual_machine=machine, name="eth0", status=self.status, mac_address=mac)
 
-    def source(self, rows):
+    def source(self, rows, **site_evidence):
         """Project one complete synthetic site report."""
         source = UnifiAdapter(
             job=self.job,
@@ -126,9 +126,20 @@ class NativeClientTests(TestCase):
             default_location_name="contract-site",
         )
         source.top_level = ("client_observation", "vm_client_observation", "unresolved_clients")
-        async_to_sync(source._load_clients)(SITE, rows, NETWORKS, NETWORK_ROWS, DEVICES, self.attach)
+        async_to_sync(source._load_clients)(SITE, rows, NETWORKS, NETWORK_ROWS, DEVICES, self.attach, **site_evidence)
         async_to_sync(source._finalize_clients)()
         return source
+
+    def test_network_11_site_alias_preserves_existing_client_observation(self):
+        current_id = "11111111-1111-4111-8111-111111111111"
+        self.sync(self.source([wired(site_id=SITE)]))
+        original = ObjectMetadata.objects.get(
+            assigned_object_id=self.client_nic.pk, metadata_type__name="UniFi client observations"
+        )
+        self.sync(self.source([wired(site_id=current_id, seen=1760000100)], current_site_id=current_id))
+        original.refresh_from_db()
+        self.assertEqual(original.value["site_id"], SITE)
+        self.assertEqual(original.value["last_seen_at"], "2025-10-09T08:55:00Z")
 
     def sync(self, source):
         """Apply the projected report to the native target."""

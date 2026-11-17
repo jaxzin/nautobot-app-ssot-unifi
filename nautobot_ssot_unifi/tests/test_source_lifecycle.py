@@ -1,7 +1,7 @@
 """Source selection and connection lifetime without a live controller."""
 
 # Keep synthetic client setup readable and independent in each regression.
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,protected-access
 
 import asyncio
 import csv
@@ -91,11 +91,13 @@ class SourceLifecycleTests(TestCase):
         current_id = "11111111-1111-4111-8111-111111111111"
         site = Site({"name": "default", "_id": current_id, "legacy_id": old_id})
         self.adapter.sync_vlans = True
+        self.adapter.sync_clients = True
         self.adapter.job._unifi_vlan_groups = {old_id: "test-group"}
         self.adapter.job._unifi_bindings = SimpleNamespace(site_ids=set)
         self.adapter.client = SimpleNamespace(
             get_sites=AsyncMock(return_value=[site]),
             _get_vlan_configuration=AsyncMock(return_value=([], [])),
+            _get_client_configuration=AsyncMock(return_value=[]),
             get_devices=AsyncMock(return_value=[]),
             session=SimpleNamespace(closed=True),
         )
@@ -103,11 +105,13 @@ class SourceLifecycleTests(TestCase):
         with (
             patch.object(self.adapter, "_load_vlans", AsyncMock(return_value={})) as load_vlans,
             patch.object(self.adapter, "_load_network_graph", AsyncMock()) as load_network_graph,
+            patch.object(self.adapter, "_load_clients", AsyncMock()) as load_clients,
         ):
             async_to_sync(self.adapter._load_sites)()
 
         load_vlans.assert_awaited_once_with(old_id, [])
         load_network_graph.assert_awaited_once_with(old_id, [], {})
+        load_clients.assert_awaited_once_with(old_id, [], {}, [], {}, {}, current_site_id=current_id)
         self.assertEqual(self.adapter.client.current_site, "default")
 
     def test_observed_models_load_without_inventing_catalog_skus(self):

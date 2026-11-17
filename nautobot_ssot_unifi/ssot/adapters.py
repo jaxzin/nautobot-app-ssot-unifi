@@ -676,7 +676,7 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         return self.client_observation if kind == "interface" else self.vm_client_observation
 
     @sync_to_async
-    def _load_clients(self, site_id, rows, networks, network_rows, devices, attach, *, current_site_id):
+    def _load_clients(self, site_id, rows, networks, network_rows, devices, attach, *, current_site_id=None):
         """Project one complete site report; nothing is written when collection raised before this."""
         from nautobot.dcim.models import Interface
         from nautobot.virtualization.models import VMInterface
@@ -898,7 +898,8 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
         if self.sync_vlans:
             _included_sites(self.job._unifi_vlan_groups, list(scopes.values()))
         for site in sites:
-            site_id = scopes[site.site_id]
+            current_site_id = site.site_id
+            site_id = scopes[current_site_id]
             site_name = site.name
             self.client.current_site = site_name
             if self.sync_vlans:
@@ -1084,5 +1085,5 @@ class UnifiAdapter(UnifiAdapterMixin, Adapter):
                     network_rows,
                     {device.raw["_id"]: device.raw for device in devices},
                     attach,
-                    current_site_id=site.site_id,
+                    current_site_id=current_site_id,
                 )
