@@ -1,87 +1,23 @@
-# Installing the App in Nautobot
+# Install the UniFi SSoT fork
 
-Here you will find detailed instructions on how to **install** and **configure** the App within your Nautobot environment.
+Use Python 3.12, Nautobot 3.2.4, and Nautobot SSoT 4.6.1 for the CI-tested
+runtime.
 
-!!! warning "Developer Note - Remove Me!"
-    Detailed instructions on installing the App. You will need to update this section based on any additional dependencies or prerequisites.
+1. Open the fork's [`develop` branch](https://github.com/jaxzin/nautobot-app-ssot-unifi/tree/develop)
+   and copy the commit SHA you want to use.
+2. Add the fork as a requirement in your Nautobot build. Replace `COMMIT_SHA`
+   with the full SHA.
 
-## Prerequisites
+   ```text
+   nautobot-ssot-unifi @ https://github.com/jaxzin/nautobot-app-ssot-unifi/archive/COMMIT_SHA.tar.gz
+   ```
 
-- The app is compatible with Nautobot 2.0.0 and higher.
-- Databases supported: PostgreSQL, MySQL
+   If your build already lists `nautobot-ssot-unifi`, replace that requirement
+   with the fork's URL. Both distributions use the same Python module.
+3. Add `nautobot_ssot` and `nautobot_ssot_unifi` to `PLUGINS` in
+   `nautobot_config.py`. Preserve the other entries.
+4. Run `nautobot-server post_upgrade` in the updated environment and roll out
+   the updated Nautobot web, worker, and scheduler processes.
+5. Open Nautobot's Jobs page and confirm the UniFi data source job is listed.
 
-!!! note
-    Please check the [dedicated page](compatibility_matrix.md) for a full compatibility matrix and the deprecation policy.
-
-### Access Requirements
-
-!!! warning "Developer Note - Remove Me!"
-    What external systems (if any) it needs access to in order to work.
-
-## Install Guide
-
-!!! note
-    Apps can be installed manually or using Python's `pip`. See the [nautobot documentation](https://docs.nautobot.com/projects/core/en/stable/plugins/#install-the-package) for more details. The pip package name for this app is [`nautobot-ssot-unifi`](https://pypi.org/project/nautobot-ssot-unifi/).
-
-The app is available as a Python package via PyPI and can be installed with `pip`:
-
-```shell
-pip install nautobot-ssot-unifi
-```
-
-To ensure Nautobot Ssot Unifi is automatically re-installed during future upgrades, create a file named `local_requirements.txt` (if not already existing) in the Nautobot root directory (alongside `requirements.txt`) and list the `nautobot-ssot-unifi` package:
-
-```shell
-echo nautobot-ssot-unifi >> local_requirements.txt
-```
-
-Once installed, the app needs to be enabled in your Nautobot configuration. The following block of code below shows the additional configuration required to be added to your `nautobot_config.py` file:
-
-- Append `"nautobot_ssot_unifi"` to the `PLUGINS` list.
-- Append the `"nautobot_ssot_unifi"` dictionary to the `PLUGINS_CONFIG` dictionary and override any defaults.
-
-```python
-# In your nautobot_config.py
-PLUGINS = [
-    "nautobot_ssot",
-    "nautobot_ssot_unifi",
-]
-
-PLUGINS_CONFIG = {
-    "nautobot_ssot": {
-        "hide_example_jobs": True,
-    },
-    'nautobot_ssot_unifi': {
-    #     ADD YOUR SETTINGS HERE
-    },
-}
-```
-
-Once the Nautobot configuration is updated, run the Post Upgrade command (`nautobot-server post_upgrade`) to run migrations and clear any cache:
-
-```shell
-nautobot-server post_upgrade
-```
-
-Then restart (if necessary) the Nautobot services which may include:
-
-- Nautobot
-- Nautobot Workers
-- Nautobot Scheduler
-
-```shell
-sudo systemctl restart nautobot nautobot-worker nautobot-scheduler
-```
-
-## App Configuration
-
-!!! warning "Developer Note - Remove Me!"
-    Any configuration required to get the App set up. Edit the table below as per the examples provided.
-
-The app behavior can be controlled with the following list of settings:
-
-| Key     | Example | Default | Description                          |
-| ------- | ------ | -------- | ------------------------------------- |
-| `enable_backup` | `True` | `True` | A boolean to represent whether or not to run backup configurations within the app. |
-| `platform_slug_map` | `{"cisco_wlc": "cisco_aireos"}` | `None` | A dictionary in which the key is the platform slug and the value is what netutils uses in any "network_os" parameter. |
-| `per_feature_bar_width` | `0.15` | `0.15` | The width of the table bar within the overview report |
+[Configure the controller and run a dry run](../user/app_getting_started.md).
