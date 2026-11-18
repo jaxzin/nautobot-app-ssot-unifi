@@ -9,10 +9,10 @@ This is the [jaxzin/nautobot-app-ssot-unifi](https://github.com/jaxzin/nautobot-
 fork of [abates/nautobot-app-ssot-unifi](https://github.com/abates/nautobot-app-ssot-unifi).
 The default branch, `develop`, carries the maintained fork.
 
-- [Install the fork](docs/admin/install.md)
-- [Configure a UniFi controller](docs/user/app_getting_started.md)
-- [Choose what to synchronize](docs/user/app_use_cases.md)
-- [Contribute a change](CONTRIBUTING.md)
+- [Install the fork](https://github.com/jaxzin/nautobot-app-ssot-unifi/blob/develop/docs/admin/install.md)
+- [Configure a UniFi controller](https://github.com/jaxzin/nautobot-app-ssot-unifi/blob/develop/docs/user/app_getting_started.md)
+- [Choose what to synchronize](https://github.com/jaxzin/nautobot-app-ssot-unifi/blob/develop/docs/user/app_use_cases.md)
+- [Contribute a change](https://github.com/jaxzin/nautobot-app-ssot-unifi/blob/develop/CONTRIBUTING.md)
 
 ## Tested runtime
 
@@ -21,4 +21,4 @@ matrix covers PostgreSQL and MySQL.
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](https://github.com/jaxzin/nautobot-app-ssot-unifi/blob/develop/LICENSE).
