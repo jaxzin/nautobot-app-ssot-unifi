@@ -4,7 +4,7 @@ services:
     environment:
       - "NAUTOBOT_DB_ENGINE=django.db.backends.postgresql"
   db:
-    image: "postgres:13-alpine"
+    image: "postgres:16-alpine"
     command:
       - "-c"
       - "max_connections=200"
@@ -12,7 +12,7 @@ services:
       - "development.env"
       - "creds.env"
     volumes:
-      - "postgres_data:/var/lib/postgresql/data"
+      - "postgres_16_data:/var/lib/postgresql/data"
     healthcheck:
       test: "pg_isready --username=$$POSTGRES_USER --dbname=$$POSTGRES_DB"
       interval: "10s"
@@ -20,4 +20,4 @@ services:
       retries: 10
 
 volumes:
-  postgres_data: {}
+  postgres_16_data: {}

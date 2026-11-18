@@ -2,6 +2,8 @@
 ignore =
   # Line length is enforced by Black, so flake8 doesn't need to check it
   E501,
+  # Black uses spaces around complex slice expressions (PEP 8 compliant)
+  E203,
   # Black disagrees with this rule, as does PEP 8; Black wins
   W503
 exclude = 

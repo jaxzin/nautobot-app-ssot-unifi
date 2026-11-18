@@ -30,12 +30,30 @@ UNIFI_MAP = {
         "role": "Firewall",
         "napalm_driver": "napalm_unifi.usg",
     },
+    "udm": {
+        "platform": "Unifi Cloud Gateway",
+        "role": "Firewall",
+        "napalm_driver": "",
+    },
+    "umbb": {
+        "platform": "Unifi Mobile Broadband",
+        "role": "Modem",
+        "napalm_driver": "",
+    },
 }
 
 UNIFI_SSOT_TAG = "unifi-ssot"
 
+# Connector-owned child of the "default" group holding only access points, so
+# wireless network assignments never claim that switches or gateways broadcast.
+UNIFI_AP_GROUP = "access-points"
+
 UNIFI_SSOT_INTERFACE_TYPES = {
     "ge": InterfaceTypeChoices.TYPE_1GE_FIXED,
+    "2p5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,
+    "2.5ge": InterfaceTypeChoices.TYPE_2GE_FIXED,
+    "10ge": InterfaceTypeChoices.TYPE_10GE_FIXED,
     "sfp": InterfaceTypeChoices.TYPE_1GE_SFP,
+    "sfp+": InterfaceTypeChoices.TYPE_10GE_SFP_PLUS,
     "other": InterfaceTypeChoices.TYPE_OTHER,
 }
